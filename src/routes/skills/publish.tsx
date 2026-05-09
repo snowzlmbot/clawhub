@@ -380,6 +380,25 @@ export function Upload() {
     existingOwnerHandle,
     ownerHandle,
   ]);
+  const slugIssue = validation.issues.find(
+    (issue) =>
+      issue === "Slug is required." ||
+      issue.startsWith("Slug must ") ||
+      issue === effectiveSlugCollision?.message,
+  );
+  const displayNameIssue = validation.issues.find((issue) => issue === "Display name is required.");
+  const versionIssue = validation.issues.find((issue) => issue.startsWith("Version must "));
+  const tagsIssue = validation.issues.find((issue) => issue === "At least one tag is required.");
+  const ownerIssue = validation.issues.find((issue) => issue.startsWith("Confirm the ownership "));
+  const fileIssues = validation.issues.filter(
+    (issue) =>
+      issue === "Add at least one file." ||
+      issue === `${requiredFileLabel} is required.` ||
+      issue.startsWith("Remove non-text files:") ||
+      issue.startsWith("Each file must be ") ||
+      issue.startsWith("Total file size "),
+  );
+  const licenseIssue = validation.issues.find((issue) => issue.startsWith("Accept the MIT-0 "));
 
   // webkitdirectory/directory attributes are set via the ref callback (setFileInputRef)
   // to ensure they persist across hydration and re-renders (#58)
@@ -540,6 +559,7 @@ export function Upload() {
                   </Badge>
                 ) : null}
               </div>
+              <InlineValidationMessage id="slug-validation-error" message={slugIssue} />
 
               <Label htmlFor="displayName">Display name</Label>
               <Input
@@ -547,6 +567,10 @@ export function Upload() {
                 value={displayName}
                 onChange={(event) => setDisplayName(event.target.value)}
                 placeholder={`My ${contentLabel}`}
+              />
+              <InlineValidationMessage
+                id="display-name-validation-error"
+                message={displayNameIssue}
               />
 
               {!isSoulMode ? (
@@ -587,6 +611,7 @@ export function Upload() {
                       </span>
                     </label>
                   ) : null}
+                  <InlineValidationMessage id="owner-validation-error" message={ownerIssue} />
                 </>
               ) : null}
 
@@ -597,6 +622,7 @@ export function Upload() {
                 onChange={(event) => setVersion(event.target.value)}
                 placeholder="1.0.0"
               />
+              <InlineValidationMessage id="version-validation-error" message={versionIssue} />
 
               <Label htmlFor="tags">Tags</Label>
               <Input
@@ -605,6 +631,7 @@ export function Upload() {
                 onChange={(event) => setTags(event.target.value)}
                 placeholder="latest, stable"
               />
+              <InlineValidationMessage id="tags-validation-error" message={tagsIssue} />
             </CardContent>
           </Card>
 
@@ -685,6 +712,11 @@ export function Upload() {
               {ignoredMacJunkNote ? (
                 <div className="text-sm text-[color:var(--ink-soft)]">{ignoredMacJunkNote}</div>
               ) : null}
+              <InlineValidationList
+                id="file-validation-errors"
+                title="Fix file selection"
+                issues={fileIssues}
+              />
             </CardContent>
           </Card>
 
@@ -745,6 +777,7 @@ export function Upload() {
                         {PLATFORM_SKILL_LICENSE}.
                       </span>
                     </label>
+                    <InlineValidationMessage id="license-validation-error" message={licenseIssue} />
                   </div>
                 </>
               ) : null}
@@ -804,5 +837,32 @@ export function Upload() {
         </form>
       </Container>
     </main>
+  );
+}
+
+function InlineValidationMessage(props: { id: string; message?: string }) {
+  if (!props.message) return null;
+  return (
+    <p id={props.id} className="text-sm font-medium text-red-600 dark:text-red-400">
+      {props.message}
+    </p>
+  );
+}
+
+function InlineValidationList(props: { id: string; title: string; issues: string[] }) {
+  if (props.issues.length === 0) return null;
+  return (
+    <div
+      id={props.id}
+      data-testid={props.id}
+      className="rounded-[var(--radius-sm)] border border-red-300/40 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-500/30 dark:bg-red-950/30 dark:text-red-300"
+    >
+      <div className="font-semibold">{props.title}</div>
+      <ul className="mt-1 list-disc space-y-1 pl-5">
+        {props.issues.map((issue) => (
+          <li key={issue}>{issue}</li>
+        ))}
+      </ul>
+    </div>
   );
 }

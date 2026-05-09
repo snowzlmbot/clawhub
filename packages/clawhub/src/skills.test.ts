@@ -78,6 +78,8 @@ describe("skills", () => {
     const workdir = await mkdtemp(join(tmpdir(), "clawhub-files-"));
     await writeFile(join(workdir, "SKILL.md"), "hi", "utf8");
     await writeFile(join(workdir, ".secret.txt"), "no", "utf8");
+    await mkdir(join(workdir, ".clawhub"), { recursive: true });
+    await writeFile(join(workdir, ".clawhub", "origin.json"), "{}", "utf8");
     await mkdir(join(workdir, "node_modules"), { recursive: true });
     await writeFile(join(workdir, "node_modules", "a.txt"), "no", "utf8");
     const files = await listTextFiles(workdir);

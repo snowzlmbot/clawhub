@@ -68,8 +68,8 @@ describe("Upload route", () => {
     render(<Upload />);
     const publishButton = screen.getByRole("button", { name: /publish/i });
     expect(publishButton.getAttribute("disabled")).not.toBeNull();
-    expect(screen.getByText(/Slug is required/i)).toBeTruthy();
-    expect(screen.getByText(/Display name is required/i)).toBeTruthy();
+    expect(screen.getAllByText(/Slug is required/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/Display name is required/i).length).toBeGreaterThan(0);
   });
 
   it("marks the input for folder uploads", async () => {
@@ -213,8 +213,22 @@ describe("Upload route", () => {
 
     expect(await screen.findByText("screenshot.png")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: /publish/i }));
-    expect(await screen.findByText(/Remove non-text files: screenshot\.png/i)).toBeTruthy();
+    expect(
+      (await screen.findAllByText(/Remove non-text files: screenshot\.png/i)).length,
+    ).toBeGreaterThan(0);
     expect(screen.getByText("screenshot.png")).toBeTruthy();
+  });
+
+  it("surfaces file validation next to the upload input", async () => {
+    render(<Upload />);
+
+    const notes = new File(["hello"], "notes.md", { type: "text/markdown" });
+    const input = screen.getByTestId("upload-input") as HTMLInputElement;
+    fireEvent.change(input, { target: { files: [notes] } });
+
+    const inline = await screen.findByTestId("file-validation-errors");
+    expect(inline.textContent).toContain("Fix file selection");
+    expect(inline.textContent).toContain("SKILL.md is required.");
   });
 
   it("shows a validation error when a skill file exceeds 10MB", async () => {
@@ -242,7 +256,9 @@ describe("Upload route", () => {
     const input = screen.getByTestId("upload-input") as HTMLInputElement;
     fireEvent.change(input, { target: { files: [skill, huge] } });
 
-    expect(await screen.findByText(/Each file must be 10MB or smaller: notes\.md/i)).toBeTruthy();
+    expect(
+      (await screen.findAllByText(/Each file must be 10MB or smaller: notes\.md/i)).length,
+    ).toBeGreaterThan(0);
     expect(
       screen.getByRole("button", { name: /publish skill/i }).getAttribute("disabled"),
     ).not.toBeNull();
@@ -352,8 +368,8 @@ describe("Upload route", () => {
     fireEvent.change(input, { target: { files: [file] } });
 
     expect(
-      await screen.findByText(/Slug is already taken\. Choose a different slug\./i),
-    ).toBeTruthy();
+      (await screen.findAllByText(/Slug is already taken\. Choose a different slug\./i)).length,
+    ).toBeGreaterThan(0);
     expect(screen.getByRole("link", { name: "/alice/taken-skill" })).toBeTruthy();
     expect(
       screen.getByRole("button", { name: /publish skill/i }).getAttribute("disabled"),

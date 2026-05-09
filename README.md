@@ -14,11 +14,8 @@ ClawHub is the **public skill registry for OpenClaw**: publish, version, and sea
 It's designed for fast browsing + a CLI-friendly API, with moderation hooks and vector search.
 It also now exposes a native **OpenClaw package catalog** for code plugins and bundle plugins.
 
-onlycrabs.ai is the **SOUL.md registry**: publish and share system lore the same way you publish skills.
-
 <p align="center">
   <a href="https://clawhub.ai">ClawHub</a> ·
-  <a href="https://onlycrabs.ai">onlycrabs.ai</a> ·
   <a href="VISION.md">Vision</a> ·
   <a href="docs/clawhub.md">Docs</a> ·
   <a href="CONTRIBUTING.md">Contributing</a> ·
@@ -38,13 +35,6 @@ onlycrabs.ai is the **SOUL.md registry**: publish and share system lore the same
 - Pin local skill installs so updates and force reinstalls cannot overwrite frozen copies.
 - Browse OpenClaw packages with family/trust/capability metadata.
 - Publish native code plugins and bundle plugins through `/packages` APIs and CLI flows.
-
-## onlycrabs.ai (SOUL.md registry)
-
-- Entry point is host-based: `onlycrabs.ai`.
-- On the onlycrabs.ai host, the home page and nav default to souls.
-- On ClawHub, souls live under `/souls`.
-- Soul bundles only accept `SOUL.md` for now (no extra files).
 
 ## How it works (high level)
 
@@ -127,8 +117,8 @@ For full setup instructions (env vars, GitHub OAuth, JWT keys, database seeding)
 
 - `VITE_CONVEX_URL`: Convex deployment URL (`https://<deployment>.convex.cloud`).
 - `VITE_CONVEX_SITE_URL`: Convex site URL (`https://<deployment>.convex.site`).
-- `VITE_SOULHUB_SITE_URL`: onlycrabs.ai site URL (`https://onlycrabs.ai`).
-- `VITE_SOULHUB_HOST`: onlycrabs.ai host match (`onlycrabs.ai`).
+- `VITE_SOULHUB_SITE_URL`: SoulHub site URL.
+- `VITE_SOULHUB_HOST`: SoulHub host match.
 - `VITE_SITE_MODE`: Optional override (`skills` or `souls`) for SSR builds.
 - `CONVEX_SITE_URL`: same as `VITE_CONVEX_SITE_URL` (auth + cookies).
 - `SITE_URL`: App URL (local: `http://localhost:3000`).
