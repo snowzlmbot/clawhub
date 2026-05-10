@@ -523,6 +523,18 @@ function shouldBackfillLatestSkillModeration(
   return isScannerManagedReason(skill.moderationReason as string | undefined);
 }
 
+function shouldForceBackfillLatestSkillModeration(
+  skill: Pick<
+    Doc<"skills">,
+    "latestVersionId" | "manualOverride" | "moderationStatus" | "moderationReason" | "softDeletedAt"
+  >,
+) {
+  if (skill.manualOverride) return false;
+  if (!shouldSyncModerationFromLatestVersion(skill)) return false;
+  if (!skill.latestVersionId) return false;
+  return isScannerManagedReason(skill.moderationReason as string | undefined);
+}
+
 async function syncSkillModerationFromLatestVersion(
   ctx: MutationCtx,
   skill: Doc<"skills">,
@@ -6539,6 +6551,7 @@ export const backfillLatestSkillModerationInternal = internalMutation({
   args: {
     cursor: v.optional(v.string()),
     batchSize: v.optional(v.number()),
+    force: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
     const batchSize = clampInt(args.batchSize ?? 100, 10, 200);
@@ -6548,7 +6561,10 @@ export const backfillLatestSkillModerationInternal = internalMutation({
 
     let patched = 0;
     for (const skill of page) {
-      if (!shouldBackfillLatestSkillModeration(skill)) continue;
+      const shouldBackfill = args.force
+        ? shouldForceBackfillLatestSkillModeration(skill)
+        : shouldBackfillLatestSkillModeration(skill);
+      if (!shouldBackfill) continue;
       await syncSkillModerationFromLatestVersion(ctx, skill, Date.now());
       patched++;
     }
@@ -6557,6 +6573,7 @@ export const backfillLatestSkillModerationInternal = internalMutation({
       await ctx.scheduler.runAfter(0, internal.skills.backfillLatestSkillModerationInternal, {
         cursor: continueCursor,
         batchSize: args.batchSize,
+        force: args.force,
       });
     }
 

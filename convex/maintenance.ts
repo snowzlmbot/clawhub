@@ -1975,6 +1975,7 @@ export const backfillLatestVersionSummaryInternal = internalMutation({
 export const backfillLatestSkillModeration: ReturnType<typeof action> = action({
   args: {
     batchSize: v.optional(v.number()),
+    force: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
     const { user } = await requireUserFromAction(ctx);
