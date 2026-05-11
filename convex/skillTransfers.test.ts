@@ -197,6 +197,81 @@ describe("skillTransfers", () => {
     );
   });
 
+  it("requestTransferInternal allows publisher admins to request user transfers for org-owned skills", async () => {
+    const insert = vi.fn(async (table: string) => {
+      if (table === "skillOwnershipTransfers") return "skillOwnershipTransfers:new";
+      return "auditLogs:1";
+    });
+
+    const result = (await requestTransferInternalHandler(
+      {
+        db: {
+          normalizeId: vi.fn(),
+          get: vi.fn(async (id: string) => {
+            if (id === "users:admin") return { _id: "users:admin", handle: "admin" };
+            if (id === "skills:1") {
+              return {
+                _id: "skills:1",
+                slug: "demo",
+                displayName: "Demo",
+                ownerUserId: "users:creator",
+                ownerPublisherId: "publishers:org",
+              };
+            }
+            if (id === "publishers:org") return { _id: "publishers:org", kind: "org" };
+            return null;
+          }),
+          query: vi.fn((table: string) => {
+            if (table === "users") {
+              return {
+                withIndex: () => ({
+                  unique: async () => ({ _id: "users:alice", handle: "alice" }),
+                }),
+              };
+            }
+            if (table === "publisherMembers") {
+              return {
+                withIndex: () => ({
+                  unique: async () => ({
+                    _id: "publisherMembers:1",
+                    publisherId: "publishers:org",
+                    userId: "users:admin",
+                    role: "admin",
+                  }),
+                }),
+              };
+            }
+            if (table === "skillOwnershipTransfers") {
+              return {
+                withIndex: () => ({
+                  collect: async () => [],
+                }),
+              };
+            }
+            throw new Error(`unexpected table ${table}`);
+          }),
+          patch: vi.fn(async () => {}),
+          insert,
+        },
+      } as never,
+      {
+        actorUserId: "users:admin",
+        skillId: "skills:1",
+        toUserHandle: "@alice",
+      } as never,
+    )) as { ok: boolean; transferId: string };
+
+    expect(result).toMatchObject({ ok: true, transferId: "skillOwnershipTransfers:new" });
+    expect(insert).toHaveBeenCalledWith(
+      "skillOwnershipTransfers",
+      expect.objectContaining({
+        skillId: "skills:1",
+        fromUserId: "users:admin",
+        toUserId: "users:alice",
+      }),
+    );
+  });
+
   it("acceptTransferInternal updates skill and alias ownership to the recipient publisher", async () => {
     const patch = vi.fn(async () => {});
     const insert = vi.fn(async () => "auditLogs:1");
@@ -278,6 +353,22 @@ describe("skillTransfers", () => {
                 },
               };
             }
+            if (table === "skillEmbeddings") {
+              return {
+                withIndex: (indexName: string) => {
+                  expect(indexName).toBe("by_skill");
+                  return {
+                    collect: async () => [
+                      {
+                        _id: "skillEmbeddings:1",
+                        skillId: "skills:1",
+                        ownerId: "users:1",
+                      },
+                    ],
+                  };
+                },
+              };
+            }
             if (table === "publishers") {
               return {
                 withIndex: (indexName: string) => {
@@ -329,6 +420,114 @@ describe("skillTransfers", () => {
       "skillSlugAliases:2",
       expect.objectContaining({
         ownerUserId: "users:2",
+        ownerPublisherId: "publishers:alice",
+      }),
+    );
+    expect(patch).toHaveBeenCalledWith(
+      "skillEmbeddings:1",
+      expect.objectContaining({
+        ownerId: "users:2",
+      }),
+    );
+    expect(patch).toHaveBeenCalledWith(
+      "skillOwnershipTransfers:1",
+      expect.objectContaining({ status: "accepted" }),
+    );
+  });
+
+  it("acceptTransferInternal honors publisher-admin source requests", async () => {
+    const patch = vi.fn(async () => {});
+    const insert = vi.fn(async () => "auditLogs:1");
+    const newPublisher = {
+      _id: "publishers:alice",
+      kind: "user",
+      handle: "alice",
+      displayName: "Alice",
+      linkedUserId: "users:alice",
+      trustedPublisher: false,
+    };
+
+    const result = (await acceptTransferInternalHandler(
+      {
+        db: {
+          normalizeId: vi.fn(),
+          get: vi.fn(async (id: string) => {
+            if (id === "users:alice") {
+              return {
+                _id: "users:alice",
+                handle: "alice",
+                personalPublisherId: "publishers:alice",
+                trustedPublisher: false,
+              };
+            }
+            if (id === "users:admin") return { _id: "users:admin", handle: "admin" };
+            if (id === "skillOwnershipTransfers:1") {
+              return {
+                _id: "skillOwnershipTransfers:1",
+                skillId: "skills:1",
+                fromUserId: "users:admin",
+                toUserId: "users:alice",
+                status: "pending",
+                requestedAt: Date.now() - 1_000,
+                expiresAt: Date.now() + 10_000,
+              };
+            }
+            if (id === "skills:1") {
+              return {
+                _id: "skills:1",
+                slug: "demo",
+                ownerUserId: "users:creator",
+                ownerPublisherId: "publishers:org",
+              };
+            }
+            if (id === "publishers:org") return { _id: "publishers:org", kind: "org" };
+            if (id === "publishers:alice") return newPublisher;
+            return null;
+          }),
+          query: vi.fn((table: string) => {
+            if (table === "publisherMembers") {
+              return {
+                withIndex: () => ({
+                  unique: async () => ({
+                    _id: "publisherMembers:1",
+                    publisherId: "publishers:org",
+                    userId: "users:admin",
+                    role: "admin",
+                  }),
+                }),
+              };
+            }
+            if (table === "publishers") {
+              return {
+                withIndex: () => ({
+                  unique: async () => newPublisher,
+                }),
+              };
+            }
+            if (table === "skillSlugAliases" || table === "skillEmbeddings") {
+              return {
+                withIndex: () => ({
+                  collect: async () => [],
+                }),
+              };
+            }
+            throw new Error(`unexpected table ${table}`);
+          }),
+          patch,
+          insert,
+        },
+      } as never,
+      {
+        actorUserId: "users:alice",
+        transferId: "skillOwnershipTransfers:1",
+      } as never,
+    )) as { ok: boolean; skillSlug: string };
+
+    expect(result).toEqual({ ok: true, skillSlug: "demo" });
+    expect(patch).toHaveBeenCalledWith(
+      "skills:1",
+      expect.objectContaining({
+        ownerUserId: "users:alice",
         ownerPublisherId: "publishers:alice",
       }),
     );

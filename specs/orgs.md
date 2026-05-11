@@ -151,6 +151,20 @@ Use dual fields during rollout:
 - backfill digests
 - remove `ownerUserId` from hot paths later
 
+### Lifecycle permissions
+
+- Skills and packages use the same publisher-admin ownership boundary.
+- Publisher owners/admins may manage user lifecycle actions for content owned by
+  that publisher: rename, transfer into another publisher they administer,
+  soft-delete, and restore.
+- Platform moderators/admins may still perform moderation actions, but a normal
+  publisher-admin restore must not lift scanner, moderator, ban, or security
+  hides.
+- Direct skill moves to org publishers are allowed only when the actor can
+  administer both the current owner and destination publisher. User-to-user skill
+  transfers remain recipient-accepted unless the actor controls the destination
+  publisher.
+
 ## Naming Rules
 
 ### New uniqueness rules

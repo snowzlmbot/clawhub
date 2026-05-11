@@ -1119,14 +1119,34 @@ async function handleTransferRequest(
 
   const toUserHandleRaw =
     typeof parsed.payload.toUserHandle === "string" ? parsed.payload.toUserHandle.trim() : "";
-  if (!toUserHandleRaw) return text("toUserHandle required", 400, headers);
+  const toOwnerRaw =
+    typeof parsed.payload.toOwner === "string"
+      ? parsed.payload.toOwner.trim()
+      : typeof parsed.payload.toPublisherHandle === "string"
+        ? parsed.payload.toPublisherHandle.trim()
+        : "";
+  const toHandleRaw = toOwnerRaw || toUserHandleRaw;
+  if (!toHandleRaw) return text("toUserHandle required", 400, headers);
   const message = typeof parsed.payload.message === "string" ? parsed.payload.message : undefined;
 
   try {
+    const publisher = (await ctx.runQuery(internal.publishers.getByHandleInternal, {
+      handle: toHandleRaw,
+    })) as { kind?: "user" | "org"; handle?: string } | null;
+    if (toOwnerRaw || publisher?.kind === "org") {
+      const result = await ctx.runMutation(internal.skills.transferSkillOwnerForUserInternal, {
+        actorUserId: transferContext.userId,
+        slug: transferContext.skill.slug,
+        toOwner: toHandleRaw,
+        ...(message ? { reason: message } : {}),
+      });
+      return json(result, 200, headers);
+    }
+
     const result = await ctx.runMutation(internal.skillTransfers.requestTransferInternal, {
       actorUserId: transferContext.userId,
       skillId: transferContext.skill._id,
-      toUserHandle: toUserHandleRaw,
+      toUserHandle: toHandleRaw,
       message,
     });
     return json(result, 200, headers);

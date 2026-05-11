@@ -26,6 +26,7 @@ describe("skills reclaim ownership transfer", () => {
       _id: "skills:1",
       slug: "capability-evolver",
       ownerUserId: "users:old",
+      stats: { downloads: 3, stars: 2, installsCurrent: 0, installsAllTime: 0 },
     };
     const activeReservation = {
       _id: "reservedSlugs:1",
@@ -40,6 +41,15 @@ describe("skills reclaim ownership transfer", () => {
       get: vi.fn(async (id: string) => {
         if (id === "users:admin") return { _id: "users:admin", role: "admin" };
         if (id === "users:new") return { _id: "users:new", role: "user" };
+        if (id === "users:old") {
+          return {
+            _id: "users:old",
+            role: "user",
+            publishedSkills: 1,
+            totalDownloads: 3,
+            totalStars: 2,
+          };
+        }
         return null;
       }),
       query: vi.fn((table: string) => {
@@ -58,6 +68,22 @@ describe("skills reclaim ownership transfer", () => {
               return {
                 collect: async () => [
                   { _id: "skillEmbeddings:1", skillId: "skills:1", ownerId: "users:old" },
+                ],
+              };
+            },
+          };
+        }
+        if (table === "skillSlugAliases") {
+          return {
+            withIndex: (name: string) => {
+              if (name !== "by_skill") throw new Error(`unexpected aliases index ${name}`);
+              return {
+                collect: async () => [
+                  {
+                    _id: "skillSlugAliases:1",
+                    skillId: "skills:1",
+                    ownerUserId: "users:old",
+                  },
                 ],
               };
             },
@@ -112,6 +138,12 @@ describe("skills reclaim ownership transfer", () => {
       "skillEmbeddings:1",
       expect.objectContaining({
         ownerId: "users:new",
+      }),
+    );
+    expect(patch).toHaveBeenCalledWith(
+      "skillSlugAliases:1",
+      expect.objectContaining({
+        ownerUserId: "users:new",
       }),
     );
     expect(patch).toHaveBeenCalledWith(

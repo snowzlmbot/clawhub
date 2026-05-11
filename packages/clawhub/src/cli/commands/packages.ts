@@ -157,6 +157,8 @@ type PackageDeleteOptions = {
   json?: boolean;
 };
 
+type PackageUndeleteOptions = PackageDeleteOptions;
+
 type PackageTransferOptions = {
   to: string;
   reason?: string;
@@ -877,6 +879,45 @@ export async function cmdDeletePackage(
       ApiV1DeleteResponseSchema,
     );
     spinner.succeed(`OK. Deleted ${name}`);
+    if (options.json) {
+      console.log(JSON.stringify(result, null, 2));
+    }
+    return result;
+  } catch (error) {
+    spinner.fail(formatError(error));
+    throw error;
+  }
+}
+
+export async function cmdUndeletePackage(
+  opts: GlobalOpts,
+  nameArg: string,
+  options: PackageUndeleteOptions = {},
+  inputAllowed = true,
+) {
+  const name = nameArg.trim();
+  if (!name) fail("Package name required");
+
+  if (!options.yes) {
+    if (!isInteractive() || inputAllowed === false) fail("Pass --yes (no input)");
+    const ok = await promptConfirm(`Restore ${name}? (restore package and releases)`);
+    if (!ok) return undefined;
+  }
+
+  const token = await requireAuthToken();
+  const registry = await getRegistry(opts, { cache: true });
+  const spinner = createSpinner(`Restoring ${name}`);
+  try {
+    const result = await apiRequest(
+      registry,
+      {
+        method: "POST",
+        path: `${ApiRoutes.packages}/${encodeURIComponent(name)}/undelete`,
+        token,
+      },
+      ApiV1DeleteResponseSchema,
+    );
+    spinner.succeed(`OK. Restored ${name}`);
     if (options.json) {
       console.log(JSON.stringify(result, null, 2));
     }

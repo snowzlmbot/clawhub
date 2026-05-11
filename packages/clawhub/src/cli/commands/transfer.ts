@@ -73,7 +73,7 @@ export async function cmdTransferRequest(
   const confirmed = await requireYesOrConfirm(
     options,
     inputAllowed,
-    `Transfer ${slug} to @${toHandle}? Recipient must accept.`,
+    `Transfer ${slug} to @${toHandle}? User transfers require recipient acceptance; org transfers apply immediately if you are an admin of both owners.`,
   );
   if (!confirmed) return undefined;
 
@@ -100,7 +100,11 @@ export async function cmdTransferRequest(
       result,
       "Transfer request response",
     );
-    spinner.succeed(`Transfer requested for ${slug} to @${parsed.toUserHandle}`);
+    if (parsed.transferred) {
+      spinner.succeed(`Transferred ${slug} to @${parsed.toPublisherHandle ?? toHandle}`);
+    } else {
+      spinner.succeed(`Transfer requested for ${slug} to @${parsed.toUserHandle ?? toHandle}`);
+    }
     return parsed;
   } catch (error) {
     spinner.fail(formatError(error));

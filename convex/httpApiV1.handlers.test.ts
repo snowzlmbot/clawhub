@@ -2955,6 +2955,52 @@ describe("httpApiV1 handlers", () => {
     );
   });
 
+  it("transfers a skill directly to an org publisher when the target handle is an org", async () => {
+    vi.mocked(requireApiTokenUser).mockResolvedValue({
+      userId: "users:1",
+      user: { handle: "p" },
+    } as never);
+
+    const runQuery = vi.fn(async (_query: unknown, args: Record<string, unknown>) => {
+      if ("slug" in args) return { _id: "skills:1", slug: "demo" };
+      if ("handle" in args) return { _id: "publishers:org", kind: "org", handle: "team" };
+      return null;
+    });
+    const runMutation = vi.fn(async (_mutation: unknown, args: Record<string, unknown>) => {
+      if ("key" in args) return okRate();
+      return {
+        ok: true,
+        transferred: true,
+        skillSlug: "demo",
+        toPublisherHandle: "team",
+      };
+    });
+
+    const response = await __handlers.skillsPostRouterV1Handler(
+      makeCtx({ runQuery, runMutation }),
+      new Request("https://example.com/api/v1/skills/demo/transfer", {
+        method: "POST",
+        headers: { Authorization: "Bearer clh_test", "content-type": "application/json" },
+        body: JSON.stringify({ toUserHandle: "@team" }),
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      ok: true,
+      transferred: true,
+      toPublisherHandle: "team",
+    });
+    expect(runMutation).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        actorUserId: "users:1",
+        slug: "demo",
+        toOwner: "@team",
+      }),
+    );
+  });
+
   it("transfer accept returns 404 when no pending request exists", async () => {
     vi.mocked(requireApiTokenUser).mockResolvedValue({
       userId: "users:1",
@@ -6745,6 +6791,34 @@ describe("httpApiV1 handlers", () => {
       makeCtx({ runMutation }),
       new Request("https://example.com/api/v1/packages/%40openclaw%2Fdemo-plugin", {
         method: "DELETE",
+        headers: { Authorization: "Bearer clh_test" },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(runMutation).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        userId: "users:1",
+        name: "@openclaw/demo-plugin",
+      }),
+    );
+  });
+
+  it("undeletes a package", async () => {
+    vi.mocked(requireApiTokenUser).mockResolvedValue({
+      userId: "users:1",
+      user: { _id: "users:1", handle: "p" },
+    } as never);
+    const runMutation = vi.fn(async (_mutation: unknown, args: Record<string, unknown>) => {
+      if ("key" in args) return okRate();
+      return { ok: true };
+    });
+
+    const response = await __handlers.packagesPostRouterV1Handler(
+      makeCtx({ runMutation }),
+      new Request("https://example.com/api/v1/packages/%40openclaw%2Fdemo-plugin/undelete", {
+        method: "POST",
         headers: { Authorization: "Bearer clh_test" },
       }),
     );

@@ -41,6 +41,7 @@ const {
   cmdPublishPackage,
   cmdReportPackage,
   cmdTransferPackage,
+  cmdUndeletePackage,
   cmdVerifyPackage,
 } = await import("./packages");
 const {
@@ -2508,5 +2509,21 @@ describe("package commands", () => {
       /--yes/i,
     );
     expect(httpMocks.apiRequest).not.toHaveBeenCalled();
+  });
+
+  it("restores package deletes through the undelete endpoint", async () => {
+    httpMocks.apiRequest.mockResolvedValueOnce({ ok: true });
+
+    await cmdUndeletePackage(makeOpts(), "@openclaw/zalo", { yes: true }, false);
+
+    expect(httpMocks.apiRequest).toHaveBeenCalledWith(
+      "https://clawhub.ai",
+      expect.objectContaining({
+        method: "POST",
+        path: "/api/v1/packages/%40openclaw%2Fzalo/undelete",
+        token: "tkn",
+      }),
+      expect.anything(),
+    );
   });
 });

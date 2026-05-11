@@ -14,6 +14,7 @@ import {
 } from "clawhub-schema";
 import { paginationOptsValidator } from "convex/server";
 import { ConvexError, v } from "convex/values";
+import semver from "semver";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import type { ActionCtx, MutationCtx, QueryCtx } from "./_generated/server";
@@ -2133,9 +2134,20 @@ export const insertAuditLogInternal = internalMutation({
 async function softDeletePackageDoc(
   ctx: Pick<MutationCtx, "db">,
   pkg: Doc<"packages">,
-  params: { actorUserId: Id<"users">; source: "cli" | "dashboard" },
+  params: {
+    actorUserId: Id<"users">;
+    actorRole?: Doc<"users">["role"];
+    source: "cli" | "dashboard";
+  },
 ) {
   if (pkg.softDeletedAt) {
+    if (params.actorRole === "admin" || params.actorRole === "moderator") {
+      await ctx.db.patch(pkg._id, {
+        softDeletedBy: params.actorUserId,
+        softDeletedByRole: params.actorRole,
+        updatedAt: Date.now(),
+      });
+    }
     return {
       ok: true as const,
       packageId: pkg._id,
@@ -2160,6 +2172,8 @@ async function softDeletePackageDoc(
 
   const packagePatch = {
     softDeletedAt: now,
+    softDeletedBy: params.actorUserId,
+    softDeletedByRole: params.actorRole ?? "user",
     updatedAt: now,
   };
   await ctx.db.patch(pkg._id, packagePatch);
@@ -2177,6 +2191,7 @@ async function softDeletePackageDoc(
       normalizedName: pkg.normalizedName,
       ownerUserId: pkg.ownerUserId,
       ownerPublisherId: pkg.ownerPublisherId,
+      actorRole: params.actorRole ?? "user",
       releaseCount,
       releaseIds: deletedReleaseIds,
       source: params.source,
@@ -2189,6 +2204,179 @@ async function softDeletePackageDoc(
     packageId: pkg._id,
     releaseCount,
     alreadyDeleted: false as const,
+  };
+}
+
+function comparePackageRestoreLatestCandidates(
+  family: Doc<"packages">["family"],
+  a: Doc<"packageReleases">,
+  b: Doc<"packageReleases">,
+) {
+  if (family === "bundle-plugin") {
+    if (a.createdAt !== b.createdAt) return a.createdAt - b.createdAt;
+    return a._id.localeCompare(b._id);
+  }
+  const aSemver = semver.valid(a.version);
+  const bSemver = semver.valid(b.version);
+  if (aSemver && bSemver) return semver.compare(aSemver, bSemver);
+  if (aSemver) return 1;
+  if (bSemver) return -1;
+  if (a.createdAt !== b.createdAt) return a.createdAt - b.createdAt;
+  return a._id.localeCompare(b._id);
+}
+
+function getPreferredRestoredPackageRelease(
+  family: Doc<"packages">["family"],
+  releases: Doc<"packageReleases">[],
+) {
+  return releases.reduce<Doc<"packageReleases"> | null>((best, release) => {
+    if (release.softDeletedAt) return best;
+    if (!best || comparePackageRestoreLatestCandidates(family, best, release) < 0) return release;
+    return best;
+  }, null);
+}
+
+function getPreservedRestoredPackageRelease(
+  pkg: Doc<"packages">,
+  releases: Doc<"packageReleases">[],
+) {
+  const byId = new Map(
+    releases.filter((release) => !release.softDeletedAt).map((release) => [release._id, release]),
+  );
+  return (
+    byId.get(pkg.tags.latest) ??
+    (pkg.latestReleaseId ? byId.get(pkg.latestReleaseId) : null) ??
+    null
+  );
+}
+
+function rebuildPackageTagsFromActiveReleases(releases: Doc<"packageReleases">[]) {
+  const tags: Doc<"packages">["tags"] = {};
+  for (const release of releases) {
+    if (release.softDeletedAt) continue;
+    for (const tag of release.distTags ?? []) {
+      tags[tag] = release._id;
+    }
+  }
+  return tags;
+}
+
+async function restorePackageDoc(
+  ctx: Pick<MutationCtx, "db">,
+  pkg: Doc<"packages">,
+  params: {
+    actorUserId: Id<"users">;
+    actorRole?: Doc<"users">["role"];
+    source: "cli" | "dashboard";
+  },
+) {
+  if (!pkg.softDeletedAt) {
+    return {
+      ok: true as const,
+      packageId: pkg._id,
+      releaseCount: 0,
+      alreadyRestored: true as const,
+    };
+  }
+
+  const now = Date.now();
+  const actorRole = params.actorRole ?? "user";
+  if (actorRole !== "admin" && actorRole !== "moderator" && pkg.softDeletedByRole !== "user") {
+    throw new ConvexError(
+      "Forbidden: This package was hidden by moderation and cannot be restored by the owner. Please contact a moderator.",
+    );
+  }
+
+  const releases = await ctx.db
+    .query("packageReleases")
+    .withIndex("by_package", (q) => q.eq("packageId", pkg._id))
+    .collect();
+  let releaseCount = 0;
+  const restoredReleaseIds: Array<Id<"packageReleases">> = [];
+  const activeReleases: Doc<"packageReleases">[] = [];
+  for (const release of releases) {
+    if (release.softDeletedAt) {
+      const restoredRelease = { ...release, softDeletedAt: undefined };
+      await ctx.db.patch(release._id, { softDeletedAt: undefined });
+      releaseCount += 1;
+      restoredReleaseIds.push(release._id);
+      activeReleases.push(restoredRelease);
+    } else {
+      activeReleases.push(release);
+    }
+  }
+
+  const nextLatest =
+    getPreservedRestoredPackageRelease(pkg, activeReleases) ??
+    getPreferredRestoredPackageRelease(pkg.family, activeReleases);
+  const nextTags = rebuildPackageTagsFromActiveReleases(activeReleases);
+  if (nextLatest) {
+    nextTags.latest = nextLatest._id;
+    if (!(nextLatest.distTags ?? []).includes("latest")) {
+      await ctx.db.patch(nextLatest._id, {
+        distTags: [...(nextLatest.distTags ?? []), "latest"],
+      });
+    }
+  }
+
+  const packagePatch: Partial<Doc<"packages">> = {
+    softDeletedAt: undefined,
+    softDeletedBy: undefined,
+    softDeletedByRole: undefined,
+    tags: nextTags,
+    latestReleaseId: nextLatest?._id,
+    latestVersionSummary: nextLatest
+      ? {
+          version: nextLatest.version,
+          createdAt: nextLatest.createdAt,
+          changelog: nextLatest.changelog,
+          compatibility: nextLatest.compatibility,
+          capabilities: nextLatest.capabilities,
+          verification: nextLatest.verification,
+          artifact: packageArtifactSummary(nextLatest),
+        }
+      : undefined,
+    summary: nextLatest?.summary,
+    capabilityTags: nextLatest?.capabilities?.capabilityTags,
+    executesCode:
+      typeof nextLatest?.capabilities?.executesCode === "boolean"
+        ? nextLatest.capabilities.executesCode
+        : undefined,
+    compatibility: nextLatest?.compatibility,
+    capabilities: nextLatest?.capabilities,
+    verification: nextLatest?.verification,
+    scanStatus: nextLatest ? resolvePackageReleaseScanStatus(nextLatest) : undefined,
+    updatedAt: now,
+  };
+  await ctx.db.patch(pkg._id, packagePatch);
+  await upsertPackageSearchDigest(ctx, {
+    ...extractPackageDigestFields(pkg),
+    ...packagePatch,
+  });
+  await ctx.db.insert("auditLogs", {
+    actorUserId: params.actorUserId,
+    action: "package.undelete",
+    targetType: "package",
+    targetId: pkg._id,
+    metadata: {
+      name: pkg.name,
+      normalizedName: pkg.normalizedName,
+      ownerUserId: pkg.ownerUserId,
+      ownerPublisherId: pkg.ownerPublisherId,
+      deletedBy: pkg.softDeletedBy,
+      deletedByRole: pkg.softDeletedByRole,
+      releaseCount,
+      releaseIds: restoredReleaseIds,
+      source: params.source,
+    },
+    createdAt: now,
+  });
+
+  return {
+    ok: true as const,
+    packageId: pkg._id,
+    releaseCount,
+    alreadyRestored: false as const,
   };
 }
 
@@ -2218,7 +2406,45 @@ export const softDeletePackageInternal = internalMutation({
       });
     }
 
-    return await softDeletePackageDoc(ctx, pkg, { actorUserId: user._id, source: "cli" });
+    return await softDeletePackageDoc(ctx, pkg, {
+      actorUserId: user._id,
+      actorRole: user.role,
+      source: "cli",
+    });
+  },
+});
+
+export const restorePackageInternal = internalMutation({
+  args: {
+    userId: v.id("users"),
+    name: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const user = await ctx.db.get(args.userId);
+    if (!user || user.deletedAt || user.deactivatedAt) throw new Error("User not found");
+
+    const normalizedName = normalizePackageName(args.name);
+    if (!normalizedName) throw new Error("Package name required");
+
+    const pkg = await getPackageByNormalizedName(ctx, normalizedName);
+    if (!pkg) throw new Error("Package not found");
+
+    if (user.role === "moderator" || user.role === "admin") {
+      // Moderators can manage packages outside their own publisher memberships.
+    } else {
+      await assertCanManageOwnedResource(ctx, {
+        actor: user,
+        ownerUserId: pkg.ownerUserId,
+        ownerPublisherId: pkg.ownerPublisherId,
+        allowedPublisherRoles: ["admin"],
+      });
+    }
+
+    return await restorePackageDoc(ctx, pkg, {
+      actorUserId: user._id,
+      actorRole: user.role,
+      source: "cli",
+    });
   },
 });
 
@@ -2242,7 +2468,11 @@ export const softDeletePackage = mutation({
       });
     }
 
-    return await softDeletePackageDoc(ctx, pkg, { actorUserId: user._id, source: "dashboard" });
+    return await softDeletePackageDoc(ctx, pkg, {
+      actorUserId: user._id,
+      actorRole: user.role,
+      source: "dashboard",
+    });
   },
 });
 

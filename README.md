@@ -64,7 +64,8 @@ Docs: [`docs/quickstart.md`](docs/quickstart.md), [`docs/cli.md`](docs/cli.md).
 
 - `clawhub uninstall <slug>` only removes a local install on your machine.
 - Uploaded registry skills use soft-delete/restore (`clawhub delete <slug>` / `clawhub undelete <slug>` or API equivalents).
-- Soft-delete/restore is allowed for the skill owner, moderators, and admins.
+- Soft-delete/restore is allowed for the skill or package owner, publisher owner/admin, moderators, and admins.
+- Packages use `clawhub package delete <name>` / `clawhub package undelete <name>`.
 - Hard delete is admin-only (management tools / ban flows).
 - Owner rename keeps the old slug as a redirect alias.
 - Owner merge hides the source listing and redirects the old slug to the canonical target.

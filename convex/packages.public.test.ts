@@ -29,6 +29,7 @@ import {
   listVersions,
   updateReleaseStaticScanInternal,
   softDeletePackageInternal,
+  restorePackageInternal,
   transferPackageOwnerForUserInternal,
   transferPackageOwnerInternal,
   repairPackageIdentityInternal,
@@ -509,6 +510,17 @@ const softDeletePackageInternalHandler = (
       packageId: string;
       releaseCount: number;
       alreadyDeleted: boolean;
+    }
+  >
+)._handler;
+const restorePackageInternalHandler = (
+  restorePackageInternal as unknown as WrappedHandler<
+    { userId: string; name: string },
+    {
+      ok: true;
+      packageId: string;
+      releaseCount: number;
+      alreadyRestored: boolean;
     }
   >
 )._handler;
@@ -2439,6 +2451,8 @@ describe("packages public queries", () => {
       "packages:demo",
       expect.objectContaining({
         softDeletedAt: expect.any(Number),
+        softDeletedBy: "users:moderator",
+        softDeletedByRole: "moderator",
       }),
     );
   });
@@ -2470,6 +2484,221 @@ describe("packages public queries", () => {
         softDeletedAt: expect.any(Number),
       }),
     );
+  });
+
+  it("allows org publisher admins to restore packages and releases", async () => {
+    const { ctx, patch, insert } = makeSoftDeletePackageCtx({
+      pkg: makePackageDoc({
+        ownerUserId: "users:org-linked",
+        ownerPublisherId: "publishers:org",
+        softDeletedAt: 123,
+        softDeletedBy: "users:owner",
+        softDeletedByRole: "user",
+        latestReleaseId: undefined,
+        latestVersionSummary: undefined,
+        tags: {},
+      }),
+      releases: [
+        makeReleaseDoc({
+          softDeletedAt: 123,
+          distTags: [],
+          summary: "restored release",
+          capabilities: { capabilityTags: ["tools"], executesCode: true },
+          compatibility: { pluginApi: ">=1.0.0" },
+          verification: { scanStatus: "clean" },
+          artifactKind: "legacy-zip",
+          integritySha256: "a".repeat(64),
+          scanStatus: "clean",
+        }),
+        makeReleaseDoc({
+          _id: "packageReleases:demo-2",
+          version: "1.1.0",
+          softDeletedAt: 123,
+          distTags: ["beta"],
+          createdAt: 2,
+          artifactKind: "legacy-zip",
+          integritySha256: "b".repeat(64),
+        }),
+      ],
+      user: { _id: "users:owner", role: "user" },
+      membership: { _id: "publisherMembers:1", role: "admin" },
+    });
+
+    const result = await restorePackageInternalHandler(ctx, {
+      userId: "users:owner",
+      name: "demo-plugin",
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      packageId: "packages:demo",
+      releaseCount: 2,
+      alreadyRestored: false,
+    });
+    expect(patch).toHaveBeenCalledWith("packageReleases:demo-1", {
+      softDeletedAt: undefined,
+    });
+    expect(patch).toHaveBeenCalledWith("packageReleases:demo-2", {
+      softDeletedAt: undefined,
+    });
+    expect(patch).toHaveBeenCalledWith("packageReleases:demo-2", {
+      distTags: ["beta", "latest"],
+    });
+    expect(patch).toHaveBeenCalledWith(
+      "packages:demo",
+      expect.objectContaining({
+        softDeletedAt: undefined,
+        softDeletedBy: undefined,
+        softDeletedByRole: undefined,
+        latestReleaseId: "packageReleases:demo-2",
+        latestVersionSummary: expect.objectContaining({ version: "1.1.0" }),
+        tags: {
+          beta: "packageReleases:demo-2",
+          latest: "packageReleases:demo-2",
+        },
+        updatedAt: expect.any(Number),
+      }),
+    );
+    expect(insert).toHaveBeenCalledWith(
+      "auditLogs",
+      expect.objectContaining({
+        actorUserId: "users:owner",
+        action: "package.undelete",
+        targetId: "packages:demo",
+        metadata: expect.objectContaining({
+          ownerPublisherId: "publishers:org",
+          releaseIds: ["packageReleases:demo-1", "packageReleases:demo-2"],
+        }),
+      }),
+    );
+  });
+
+  it("rejects owner restore for moderator-deleted packages", async () => {
+    const { ctx, patch } = makeSoftDeletePackageCtx({
+      pkg: makePackageDoc({
+        ownerUserId: "users:org-linked",
+        ownerPublisherId: "publishers:org",
+        softDeletedAt: 123,
+        softDeletedBy: "users:moderator",
+        softDeletedByRole: "moderator",
+      }),
+      user: { _id: "users:owner", role: "user" },
+      membership: { _id: "publisherMembers:1", role: "admin" },
+    });
+
+    await expect(
+      restorePackageInternalHandler(ctx, {
+        userId: "users:owner",
+        name: "demo-plugin",
+      }),
+    ).rejects.toThrow(/^Forbidden:/i);
+
+    expect(patch).not.toHaveBeenCalled();
+  });
+
+  it("rejects owner restore for packages with unknown delete provenance", async () => {
+    const { ctx, patch } = makeSoftDeletePackageCtx({
+      pkg: makePackageDoc({
+        ownerUserId: "users:org-linked",
+        ownerPublisherId: "publishers:org",
+        softDeletedAt: 123,
+        softDeletedBy: undefined,
+        softDeletedByRole: undefined,
+      }),
+      user: { _id: "users:owner", role: "user" },
+      membership: { _id: "publisherMembers:1", role: "admin" },
+    });
+
+    await expect(
+      restorePackageInternalHandler(ctx, {
+        userId: "users:owner",
+        name: "demo-plugin",
+      }),
+    ).rejects.toThrow(/^Forbidden:/i);
+
+    expect(patch).not.toHaveBeenCalled();
+  });
+
+  it("lets moderators restamp already-deleted package provenance", async () => {
+    const { ctx, patch } = makeSoftDeletePackageCtx({
+      pkg: makePackageDoc({
+        ownerUserId: "users:owner",
+        softDeletedAt: 123,
+        softDeletedBy: "users:owner",
+        softDeletedByRole: "user",
+      }),
+      user: { _id: "users:moderator", role: "moderator" },
+    });
+
+    await expect(
+      softDeletePackageInternalHandler(ctx, {
+        userId: "users:moderator",
+        name: "demo-plugin",
+      }),
+    ).resolves.toMatchObject({ ok: true, alreadyDeleted: true });
+
+    expect(patch).toHaveBeenCalledWith(
+      "packages:demo",
+      expect.objectContaining({
+        softDeletedBy: "users:moderator",
+        softDeletedByRole: "moderator",
+      }),
+    );
+  });
+
+  it("preserves existing latest tags when restoring packages", async () => {
+    const { ctx, patch } = makeSoftDeletePackageCtx({
+      pkg: makePackageDoc({
+        softDeletedAt: 123,
+        softDeletedBy: "users:owner",
+        softDeletedByRole: "user",
+        latestReleaseId: "packageReleases:demo-1",
+        tags: {
+          latest: "packageReleases:demo-1",
+          beta: "packageReleases:demo-2",
+        },
+      }),
+      releases: [
+        makeReleaseDoc({
+          version: "1.0.0",
+          softDeletedAt: 123,
+          distTags: ["latest"],
+          artifactKind: "legacy-zip",
+          integritySha256: "a".repeat(64),
+        }),
+        makeReleaseDoc({
+          _id: "packageReleases:demo-2",
+          version: "2.0.0-beta.1",
+          softDeletedAt: 123,
+          distTags: ["beta"],
+          createdAt: 2,
+          artifactKind: "legacy-zip",
+          integritySha256: "b".repeat(64),
+        }),
+      ],
+    });
+
+    await expect(
+      restorePackageInternalHandler(ctx, {
+        userId: "users:owner",
+        name: "demo-plugin",
+      }),
+    ).resolves.toMatchObject({ ok: true, alreadyRestored: false });
+
+    expect(patch).toHaveBeenCalledWith(
+      "packages:demo",
+      expect.objectContaining({
+        latestReleaseId: "packageReleases:demo-1",
+        latestVersionSummary: expect.objectContaining({ version: "1.0.0" }),
+        tags: {
+          latest: "packageReleases:demo-1",
+          beta: "packageReleases:demo-2",
+        },
+      }),
+    );
+    expect(patch).not.toHaveBeenCalledWith("packageReleases:demo-2", {
+      distTags: ["beta", "latest"],
+    });
   });
 
   it("syncs package search digests when packages are soft-deleted", async () => {

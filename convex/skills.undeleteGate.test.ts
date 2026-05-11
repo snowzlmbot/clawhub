@@ -42,9 +42,13 @@ function makeSkill(overrides: Record<string, unknown> = {}) {
 function makeCtx({
   skill,
   actor,
+  hiddenBy,
+  membership,
 }: {
   skill: Record<string, unknown> | null;
   actor: { _id: string; role?: UserRole };
+  hiddenBy?: { _id: string; role?: UserRole } | null;
+  membership?: Record<string, unknown> | null;
 }) {
   const patch = vi.fn(async () => {});
   const insert = vi.fn(async () => "auditLogs:1");
@@ -53,6 +57,7 @@ function makeCtx({
     normalizeId: vi.fn(),
     get: vi.fn(async (id: string) => {
       if (id === actor._id) return actor;
+      if (hiddenBy && id === hiddenBy._id) return hiddenBy;
       return null;
     }),
     query: vi.fn((table: string) => {
@@ -67,6 +72,11 @@ function makeCtx({
       if (table === "skillEmbeddings") {
         return {
           withIndex: () => ({ collect: async () => [] }),
+        };
+      }
+      if (table === "publisherMembers") {
+        return {
+          withIndex: () => ({ unique: async () => membership ?? null }),
         };
       }
       if (table === "globalStats") {
@@ -89,6 +99,63 @@ function makeCtx({
 }
 
 describe("setSkillSoftDeletedInternal B1 undelete gate", () => {
+  it("allows org publisher admins to restore org-admin hidden skills", async () => {
+    const skill = makeSkill({
+      ownerUserId: "users:creator",
+      ownerPublisherId: "publishers:org",
+      hiddenBy: "users:hidden-admin",
+      moderationReason: undefined,
+    });
+    const { ctx, patch } = makeCtx({
+      skill,
+      actor: { _id: "users:actor", role: "user" },
+      hiddenBy: { _id: "users:hidden-admin", role: "user" },
+      membership: { _id: "publisherMembers:1", role: "admin" },
+    });
+
+    await expect(
+      setSkillSoftDeletedInternalHandler(ctx, {
+        userId: "users:actor",
+        slug: "demo",
+        deleted: false,
+      }),
+    ).resolves.toEqual({ ok: true });
+
+    expect(patch).toHaveBeenCalledWith(
+      "skills:1",
+      expect.objectContaining({
+        softDeletedAt: undefined,
+        moderationStatus: "active",
+        hiddenBy: undefined,
+      }),
+    );
+  });
+
+  it("rejects org publisher admins restoring moderator-hidden skills", async () => {
+    const skill = makeSkill({
+      ownerUserId: "users:creator",
+      ownerPublisherId: "publishers:org",
+      hiddenBy: "users:mod",
+      moderationReason: undefined,
+    });
+    const { ctx, patch } = makeCtx({
+      skill,
+      actor: { _id: "users:actor", role: "user" },
+      hiddenBy: { _id: "users:mod", role: "moderator" },
+      membership: { _id: "publisherMembers:1", role: "admin" },
+    });
+
+    await expect(
+      setSkillSoftDeletedInternalHandler(ctx, {
+        userId: "users:actor",
+        slug: "demo",
+        deleted: false,
+      }),
+    ).rejects.toThrow(/^Forbidden:/i);
+
+    expect(patch).not.toHaveBeenCalled();
+  });
+
   it("rejects owner undelete when moderationReason is set (moderator-hidden)", async () => {
     const skill = makeSkill({ moderationReason: "manual.quality" });
     const { ctx, patch, insert } = makeCtx({

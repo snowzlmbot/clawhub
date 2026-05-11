@@ -855,6 +855,10 @@ const packages = defineTable({
   reportCount: v.optional(v.number()),
   lastReportedAt: v.optional(v.number()),
   softDeletedAt: v.optional(v.number()),
+  softDeletedBy: v.optional(v.id("users")),
+  softDeletedByRole: v.optional(
+    v.union(v.literal("admin"), v.literal("moderator"), v.literal("user")),
+  ),
   createdAt: v.number(),
   updatedAt: v.number(),
 })

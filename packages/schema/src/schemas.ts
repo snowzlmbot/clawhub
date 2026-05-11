@@ -445,9 +445,12 @@ export const ApiV1SkillMergeResponseSchema = type({
 
 export const ApiV1TransferRequestResponseSchema = type({
   ok: "true",
-  transferId: "string",
-  toUserHandle: "string",
-  expiresAt: "number",
+  transferId: "string?",
+  toUserHandle: "string?",
+  toPublisherHandle: "string?",
+  skillSlug: "string?",
+  expiresAt: "number?",
+  transferred: "boolean?",
 });
 
 export const ApiV1TransferDecisionResponseSchema = type({

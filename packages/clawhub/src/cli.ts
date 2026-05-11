@@ -27,6 +27,7 @@ import {
   cmdPublishPackage,
   cmdReportPackage,
   cmdTransferPackage,
+  cmdUndeletePackage,
   cmdVerifyPackage,
 } from "./cli/commands/packages.js";
 import { cmdPublish } from "./cli/commands/publish.js";
@@ -467,6 +468,16 @@ registerCommand(packageCmd, ["package", "delete"])
   .action(async (name, options) => {
     const opts = await resolveGlobalOpts();
     await cmdDeletePackage(opts, name, options, isInputAllowed());
+  });
+
+registerCommand(packageCmd, ["package", "undelete"])
+  .description("Restore a soft-deleted package and releases")
+  .argument("<name>", "Package name")
+  .option("--yes", "Skip confirmation")
+  .option("--json", "Output JSON")
+  .action(async (name, options) => {
+    const opts = await resolveGlobalOpts();
+    await cmdUndeletePackage(opts, name, options, isInputAllowed());
   });
 
 registerCommand(packageCmd, ["package", "transfer"])

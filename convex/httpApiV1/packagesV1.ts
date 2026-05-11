@@ -89,6 +89,7 @@ const internalRefs = internal as unknown as {
     recordPackageInstallInternal: unknown;
     requestRescanForApiTokenInternal: unknown;
     softDeletePackageInternal: unknown;
+    restorePackageInternal: unknown;
     moderatePackageReleaseForUserInternal: unknown;
     reportPackageForUserInternal: unknown;
     listPackageReportsInternal: unknown;
@@ -1725,6 +1726,23 @@ export async function packagesPostRouterV1Handler(ctx: ActionCtx, request: Reque
         400,
         rate.headers,
       );
+    }
+  }
+
+  if (packageSegments[0] === "undelete" && packageSegments.length === 1) {
+    const rate = await applyRateLimit(ctx, request, "write");
+    if (!rate.ok) return rate.response;
+    const auth = await requireApiTokenUserOrResponse(ctx, request, rate.headers);
+    if (!auth.ok) return auth.response;
+
+    try {
+      await runMutationRef(ctx, internalRefs.packages.restorePackageInternal, {
+        userId: auth.userId,
+        name: packageName,
+      });
+      return json({ ok: true }, 200, rate.headers);
+    } catch (error) {
+      return softDeleteErrorToResponse("package", error, rate.headers);
     }
   }
 

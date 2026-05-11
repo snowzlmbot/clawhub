@@ -74,8 +74,11 @@ import {
   assertCanManageOwnedResource,
   ensurePersonalPublisherForUser,
   getOwnerPublisher,
+  getPublisherByHandle,
   getPublisherMembership,
+  isPublisherActive,
   isPublisherRoleAllowed,
+  normalizePublisherHandle,
   requirePublisherRole,
 } from "./lib/publishers";
 import {
@@ -7684,6 +7687,26 @@ export const mergeOwnedSkillIntoCanonicalInternal = internalMutation({
   },
 });
 
+async function canManageSkillOwnerForActor(
+  ctx: MutationCtx,
+  actor: Doc<"users">,
+  skill: Pick<Doc<"skills">, "ownerUserId" | "ownerPublisherId">,
+) {
+  try {
+    await assertCanManageOwnedResource(ctx, {
+      actor,
+      ownerUserId: skill.ownerUserId,
+      ownerPublisherId: skill.ownerPublisherId,
+      allowedPublisherRoles: ["admin"],
+      allowPlatformAdmin: true,
+    });
+    return true;
+  } catch (error) {
+    if (error instanceof ConvexError || error instanceof Error) return false;
+    throw error;
+  }
+}
+
 async function renameOwnedSkillByActor(
   ctx: MutationCtx,
   actorUserId: Id<"users">,
@@ -7705,7 +7728,13 @@ async function renameOwnedSkillByActor(
   const resolved = await resolveSkillBySlugOrAlias(ctx, sourceSlug);
   const skill = resolved.skill;
   if (!skill || skill.softDeletedAt) throw new ConvexError("Skill not found");
-  if (skill.ownerUserId !== actorUserId) throw new ConvexError("Forbidden");
+  await assertCanManageOwnedResource(ctx, {
+    actor: user,
+    ownerUserId: skill.ownerUserId,
+    ownerPublisherId: skill.ownerPublisherId,
+    allowedPublisherRoles: ["admin"],
+    allowPlatformAdmin: true,
+  });
   if (skill.slug === newSlug) {
     return { ok: true as const, slug: skill.slug, previousSlug: skill.slug };
   }
@@ -7716,7 +7745,10 @@ async function renameOwnedSkillByActor(
     .unique();
   if (existingSkill && existingSkill._id !== skill._id) {
     const owner = await ctx.db.get(existingSkill.ownerUserId);
-    if (existingSkill.ownerUserId === actorUserId) {
+    const ownsExisting =
+      existingSkill.ownerUserId === actorUserId ||
+      (await canManageSkillOwnerForActor(ctx, user, existingSkill));
+    if (ownsExisting) {
       throw new ConvexError("Slug already belongs to one of your skills. Use merge instead.");
     }
     throw new ConvexError(buildSlugTakenErrorMessage(existingSkill, owner));
@@ -7986,25 +8018,166 @@ async function transferSkillOwnershipAndEmbeddings(
   params: {
     skill: Doc<"skills">;
     ownerUserId: Id<"users">;
+    ownerPublisherId?: Id<"publishers"> | null;
     now: number;
   },
 ) {
-  if (params.skill.ownerUserId === params.ownerUserId) return;
-
-  await ctx.db.patch(params.skill._id, {
+  const patch: Partial<Doc<"skills">> = {
     ownerUserId: params.ownerUserId,
     lastReviewedAt: params.now,
     updatedAt: params.now,
-  });
+  };
+  if ("ownerPublisherId" in params) {
+    patch.ownerPublisherId = params.ownerPublisherId ?? undefined;
+  }
 
-  const embeddings = await listSkillEmbeddingsForSkill(ctx, params.skill._id);
-  for (const embedding of embeddings) {
-    await ctx.db.patch(embedding._id, {
-      ownerId: params.ownerUserId,
+  const ownerChanged = params.skill.ownerUserId !== params.ownerUserId;
+  const publisherChanged =
+    "ownerPublisherId" in params && params.skill.ownerPublisherId !== params.ownerPublisherId;
+  if (!ownerChanged && !publisherChanged) return;
+
+  await ctx.db.patch(params.skill._id, patch);
+
+  const aliases = await listSkillSlugAliasesForSkill(ctx, params.skill._id);
+  for (const alias of aliases) {
+    await ctx.db.patch(alias._id, {
+      ownerUserId: params.ownerUserId,
+      ...("ownerPublisherId" in params
+        ? { ownerPublisherId: params.ownerPublisherId ?? undefined }
+        : {}),
       updatedAt: params.now,
     });
   }
+
+  if (ownerChanged) {
+    const embeddings = await listSkillEmbeddingsForSkill(ctx, params.skill._id);
+    for (const embedding of embeddings) {
+      await ctx.db.patch(embedding._id, {
+        ownerId: params.ownerUserId,
+        updatedAt: params.now,
+      });
+    }
+    await adjustUserSkillStatsForSkillChange(ctx, params.skill, {
+      ...params.skill,
+      ...patch,
+    });
+  }
 }
+
+async function syncSkillSearchDigestForSkillDoc(ctx: MutationCtx, skill: Doc<"skills">) {
+  const owner = await getOwnerPublisher(ctx, {
+    ownerPublisherId: skill.ownerPublisherId,
+    ownerUserId: skill.ownerUserId,
+  });
+  await upsertSkillSearchDigest(ctx, {
+    ...extractDigestFields(skill),
+    ownerHandle: owner?.handle ?? "",
+    ownerKind: owner?.kind,
+    ownerName: owner?.linkedUserId ? owner.handle : undefined,
+    ownerDisplayName: owner?.displayName,
+    ownerImage: owner?.image,
+  });
+}
+
+async function canManagePublisherDestination(
+  ctx: MutationCtx,
+  actor: Doc<"users">,
+  publisher: Doc<"publishers">,
+) {
+  if (actor.role === "admin") return true;
+  if (publisher.kind === "user" && publisher.linkedUserId === actor._id) return true;
+  const membership = await getPublisherMembership(ctx, publisher._id, actor._id);
+  return Boolean(membership && isPublisherRoleAllowed(membership.role, ["admin"]));
+}
+
+export const transferSkillOwnerForUserInternal = internalMutation({
+  args: {
+    actorUserId: v.id("users"),
+    slug: v.string(),
+    toOwner: v.string(),
+    reason: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const actor = await ctx.db.get(args.actorUserId);
+    if (!actor || actor.deletedAt || actor.deactivatedAt) throw new ConvexError("Unauthorized");
+
+    const slug = normalizeSkillSlug(args.slug);
+    if (!slug) throw new ConvexError("Skill slug required");
+    const skill = await ctx.db
+      .query("skills")
+      .withIndex("by_slug", (q) => q.eq("slug", slug))
+      .unique();
+    if (!skill || skill.softDeletedAt) throw new ConvexError("Skill not found");
+
+    await assertCanManageOwnedResource(ctx, {
+      actor,
+      ownerUserId: skill.ownerUserId,
+      ownerPublisherId: skill.ownerPublisherId,
+      allowedPublisherRoles: ["admin"],
+      allowPlatformAdmin: true,
+    });
+
+    const destinationHandle = normalizePublisherHandle(args.toOwner);
+    if (!destinationHandle) throw new ConvexError("Destination owner is required");
+    const destinationPublisher = await getPublisherByHandle(ctx, destinationHandle);
+    if (!destinationPublisher || !isPublisherActive(destinationPublisher)) {
+      throw new ConvexError(`Publisher "@${destinationHandle}" not found`);
+    }
+    if (!(await canManagePublisherDestination(ctx, actor, destinationPublisher))) {
+      throw new ConvexError(
+        `You do not have admin access for "@${destinationHandle}". Ask an owner or admin to add you before transferring this skill.`,
+      );
+    }
+
+    const nextOwner =
+      destinationPublisher.kind === "user" && destinationPublisher.linkedUserId
+        ? await ctx.db.get(destinationPublisher.linkedUserId)
+        : actor;
+    if (!nextOwner || nextOwner.deletedAt || nextOwner.deactivatedAt) {
+      throw new ConvexError("Destination owner user not found");
+    }
+
+    const now = Date.now();
+    await transferSkillOwnershipAndEmbeddings(ctx, {
+      skill,
+      ownerUserId: nextOwner._id,
+      ownerPublisherId: destinationPublisher._id,
+      now,
+    });
+    await syncSkillSearchDigestForSkillDoc(ctx, {
+      ...skill,
+      ownerUserId: nextOwner._id,
+      ownerPublisherId: destinationPublisher._id,
+      lastReviewedAt: now,
+      updatedAt: now,
+    });
+
+    await ctx.db.insert("auditLogs", {
+      actorUserId: actor._id,
+      action: "skill.owner.transfer",
+      targetType: "skill",
+      targetId: skill._id,
+      metadata: {
+        slug: skill.slug,
+        previousOwnerUserId: skill.ownerUserId,
+        previousOwnerPublisherId: skill.ownerPublisherId,
+        nextOwnerUserId: nextOwner._id,
+        nextOwnerPublisherId: destinationPublisher._id,
+        reason: args.reason || undefined,
+      },
+      createdAt: now,
+    });
+
+    return {
+      ok: true as const,
+      transferred: true as const,
+      skillSlug: skill.slug,
+      toPublisherHandle: destinationPublisher.handle,
+      ownerUserId: nextOwner._id,
+      ownerPublisherId: destinationPublisher._id,
+    };
+  },
+});
 
 async function releaseActiveReservationsForSlug(
   ctx: MutationCtx,
@@ -9225,6 +9398,32 @@ export const insertVersion = internalMutation({
   },
 });
 
+async function isOwnerInitiatedSkillHideForActor(
+  ctx: MutationCtx,
+  skill: Pick<Doc<"skills">, "ownerUserId" | "ownerPublisherId" | "hiddenBy">,
+  actorUserId: Id<"users">,
+) {
+  if (skill.hiddenBy === actorUserId) return true;
+  if (!skill.hiddenBy) return false;
+
+  const hiddenBy = await ctx.db.get(skill.hiddenBy);
+  if (!hiddenBy || hiddenBy.deletedAt || hiddenBy.deactivatedAt) return false;
+  if (hiddenBy.role === "admin" || hiddenBy.role === "moderator") return false;
+
+  try {
+    await assertCanManageOwnedResource(ctx, {
+      actor: hiddenBy,
+      ownerUserId: skill.ownerUserId,
+      ownerPublisherId: skill.ownerPublisherId,
+      allowedPublisherRoles: ["admin"],
+    });
+    return true;
+  } catch (error) {
+    if (error instanceof ConvexError || error instanceof Error) return false;
+    throw error;
+  }
+}
+
 export const setSkillSoftDeletedInternal = internalMutation({
   args: {
     userId: v.id("users"),
@@ -9246,12 +9445,24 @@ export const setSkillSoftDeletedInternal = internalMutation({
     if (!skill) throw new Error("Skill not found");
 
     const isModeratorOrAdmin = user.role === "admin" || user.role === "moderator";
-    const isOwner = skill.ownerUserId === args.userId;
+    let isOwner = skill.ownerUserId === args.userId;
 
-    if (!isOwner && !isModeratorOrAdmin) {
-      // Preserve legacy behavior: delegate to assertModerator to produce the
-      // standard "Forbidden" error for non-owners without elevated roles.
-      assertModerator(user);
+    if (!isOwner) {
+      try {
+        await assertCanManageOwnedResource(ctx, {
+          actor: user,
+          ownerUserId: skill.ownerUserId,
+          ownerPublisherId: skill.ownerPublisherId,
+          allowedPublisherRoles: ["admin"],
+        });
+        isOwner = true;
+      } catch {
+        if (!isModeratorOrAdmin) {
+          // Preserve legacy behavior: delegate to assertModerator to produce the
+          // standard "Forbidden" error for non-owners without elevated roles.
+          assertModerator(user);
+        }
+      }
     }
 
     // Owner-delete provenance guard: an owner must NOT be able to "re-delete"
@@ -9280,7 +9491,7 @@ export const setSkillSoftDeletedInternal = internalMutation({
     // stale `moderationReason` on active rows.
     if (args.deleted && isOwner && !isModeratorOrAdmin) {
       const isCurrentlyHidden = Boolean(skill.softDeletedAt) || skill.moderationStatus === "hidden";
-      const isOwnerInitiatedHide = skill.hiddenBy === args.userId;
+      const isOwnerInitiatedHide = await isOwnerInitiatedSkillHideForActor(ctx, skill, args.userId);
       if (isCurrentlyHidden && !isOwnerInitiatedHide) {
         // Prefix with "Forbidden:" so HTTP boundary mappers
         // (softDeleteErrorToResponse) deterministically return 403 instead of
@@ -9369,7 +9580,7 @@ export const setSkillSoftDeletedInternal = internalMutation({
       ]);
       const reason = skill.moderationReason as string | undefined;
       const ownerInitiatedHide =
-        skill.hiddenBy === args.userId &&
+        (await isOwnerInitiatedSkillHideForActor(ctx, skill, args.userId)) &&
         (reason === undefined || !OWNER_UNDELETE_DENIED_REASONS.has(reason));
       if (!ownerInitiatedHide) {
         // Prefix with "Forbidden:" so HTTP boundary mappers
