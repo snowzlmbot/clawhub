@@ -1,9 +1,17 @@
 import { Building2, FileText, Package, Plug, User } from "lucide-react";
+import { parseSkillIcon } from "../lib/skillIcon";
 
 type MarketplaceIconProps = {
   kind: "skill" | "plugin" | "soul" | "user" | "org";
   label: string;
   imageUrl?: string | null;
+  /**
+   * Skill custom-icon protocol string (e.g. `lucide:Plug`). Only honoured
+   * when `kind === "skill"`; for other kinds the prop is ignored. Falls
+   * back to the default kind icon when the value cannot be parsed or is
+   * not in the client allow-list.
+   */
+  icon?: string | null;
   size?: "xs" | "sm" | "md";
 };
 
@@ -35,7 +43,14 @@ function getIcon(kind: MarketplaceIconProps["kind"]) {
   }
 }
 
-export function MarketplaceIcon({ kind, label, imageUrl, size = "sm" }: MarketplaceIconProps) {
+export function MarketplaceIcon({
+  kind,
+  label,
+  imageUrl,
+  icon,
+  size = "sm",
+}: MarketplaceIconProps) {
+  const customIcon = kind === "skill" ? parseSkillIcon(icon) : null;
   const Icon = getIcon(kind);
   const tone = hashTone(label);
 
@@ -52,6 +67,8 @@ export function MarketplaceIcon({ kind, label, imageUrl, size = "sm" }: Marketpl
     >
       {imageUrl ? (
         <img className="marketplace-icon-image" src={imageUrl} alt="" loading="lazy" />
+      ) : customIcon?.kind === "lucide" ? (
+        <customIcon.component className="marketplace-icon-glyph" strokeWidth={1.8} />
       ) : (
         <Icon className="marketplace-icon-glyph" strokeWidth={1.8} />
       )}
