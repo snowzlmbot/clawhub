@@ -3,6 +3,11 @@ import { join } from "node:path";
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
 import { expectHealthyPage, trackRuntimeErrors, waitForHydration } from "../helpers/runtimeErrors";
 
+test.skip(
+  process.env.VITE_ENABLE_DEV_AUTH !== "1",
+  "local-auth lifecycle tests require the local dev auth runner",
+);
+
 function skillMd(args: { slug: string; displayName: string; versionLabel: string }) {
   return `---
 name: ${args.slug}
