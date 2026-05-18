@@ -51,6 +51,7 @@ export declare const PackageVerificationSummarySchema: import("arktype/internal/
     sourceCommit?: string | undefined;
     sourceTag?: string | undefined;
     hasProvenance?: boolean | undefined;
+    trustedOpenClawPlugin?: boolean | undefined;
     scanStatus?: "clean" | "suspicious" | "malicious" | "pending" | "not-run" | undefined;
 }, {}>;
 export type PackageVerificationSummary = (typeof PackageVerificationSummarySchema)[inferred];
@@ -339,6 +340,7 @@ export declare const ApiV1PackageResponseSchema: import("arktype/internal/varian
             sourceCommit?: string | undefined;
             sourceTag?: string | undefined;
             hasProvenance?: boolean | undefined;
+            trustedOpenClawPlugin?: boolean | undefined;
             scanStatus?: "clean" | "suspicious" | "malicious" | "pending" | "not-run" | undefined;
         } | null | undefined;
         artifact?: {
@@ -427,6 +429,7 @@ export declare const ApiV1PackageVersionResponseSchema: import("arktype/internal
             sourceCommit?: string | undefined;
             sourceTag?: string | undefined;
             hasProvenance?: boolean | undefined;
+            trustedOpenClawPlugin?: boolean | undefined;
             scanStatus?: "clean" | "suspicious" | "malicious" | "pending" | "not-run" | undefined;
         } | null | undefined;
         artifact?: {

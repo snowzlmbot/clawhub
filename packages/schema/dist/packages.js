@@ -59,6 +59,7 @@ export const PackageVerificationSummarySchema = type({
     sourceCommit: "string?",
     sourceTag: "string?",
     hasProvenance: "boolean?",
+    trustedOpenClawPlugin: "boolean?",
     scanStatus: '"clean"|"suspicious"|"malicious"|"pending"|"not-run"?',
 });
 export const PackageStatsSchema = type({
