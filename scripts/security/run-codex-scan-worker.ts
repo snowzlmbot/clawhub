@@ -1,12 +1,11 @@
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { ConvexHttpClient } from "convex/browser";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
 import {
-  applyInjectionSignalFloor,
   detectInjectionPatterns,
   parseLlmEvalResponse,
   SKILL_SECURITY_EVALUATOR_SYSTEM_PROMPT,
@@ -35,6 +34,24 @@ type ClaimedJob = {
 
 const root = resolve(new URL("../..", import.meta.url).pathname);
 const schemaPath = join(root, "scripts/security/codex-scan-output.schema.json");
+const ARTIFACT_SIGNAL_FILE_EXTENSIONS = new Set([
+  ".cjs",
+  ".css",
+  ".html",
+  ".js",
+  ".json",
+  ".jsx",
+  ".md",
+  ".mjs",
+  ".sh",
+  ".toml",
+  ".ts",
+  ".tsx",
+  ".txt",
+  ".xml",
+  ".yaml",
+  ".yml",
+]);
 
 function parseArgs() {
   const args = process.argv.slice(2);
@@ -120,7 +137,38 @@ async function writeArtifactWorkspace(job: ClaimedJob, workspace: string) {
   }
 }
 
-function buildPrompt(job: ClaimedJob) {
+function shouldReadArtifactSignalFile(path: string) {
+  const lower = path.toLowerCase();
+  if (lower.endsWith("/skill.md") || lower.endsWith("/package.json")) return true;
+  return ARTIFACT_SIGNAL_FILE_EXTENSIONS.has(lower.slice(lower.lastIndexOf(".")));
+}
+
+async function collectArtifactSignalText(dir: string, maxBytes = 1_000_000) {
+  let remaining = maxBytes;
+  const chunks: string[] = [];
+
+  async function visit(current: string) {
+    if (remaining <= 0) return;
+    for (const entry of await readdir(current, { withFileTypes: true })) {
+      if (remaining <= 0) return;
+      const path = join(current, entry.name);
+      if (entry.isDirectory()) {
+        await visit(path);
+        continue;
+      }
+      if (!entry.isFile() || !shouldReadArtifactSignalFile(path)) continue;
+      const bytes = await readFile(path);
+      const slice = bytes.subarray(0, Math.min(bytes.byteLength, remaining));
+      chunks.push(slice.toString("utf8"));
+      remaining -= slice.byteLength;
+    }
+  }
+
+  await visit(dir);
+  return chunks.join("\n");
+}
+
+function buildPrompt(job: ClaimedJob, injectionSignals: string[]) {
   const vt = JSON.stringify(
     (job.target.version as Record<string, unknown> | undefined)?.vtAnalysis ??
       (job.target.release as Record<string, unknown> | undefined)?.vtAnalysis ??
@@ -137,12 +185,16 @@ Additional ClawHub policy for this Codex run:
 - If VirusTotal is the only negative signal and artifact evidence is coherent, return benign.
 - Static scan findings are signal. If static scan marked malicious, decide from artifact evidence whether the hold should remain.
 - @openclaw plugin packages from the OpenClaw publisher are trusted by default. Keep them benign unless concrete artifact evidence proves malicious behavior.
+- Treat pre-scan prompt-injection indicators as artifact context for your review, not as an automatic verdict.
 
 Worker context:
 - target kind: ${job.job.targetKind}
 - source: ${job.job.source}
 - non-VT malicious signal present: ${job.job.hasMaliciousSignal ? "yes" : "no"}
 - trusted @openclaw plugin: ${trusted ? "yes" : "no"}
+- pre-scan artifact injection signals: ${
+    injectionSignals.length > 0 ? injectionSignals.join(", ") : "none"
+  }
 
 VirusTotal telemetry supplied to Codex:
 \`\`\`json
@@ -234,7 +286,9 @@ async function runCodex(job: ClaimedJob, workspace: string) {
     "--json",
     "-",
   ];
-  const prompt = buildPrompt(job);
+  const artifactSignalText = await collectArtifactSignalText(join(workspace, "artifact"));
+  const injectionSignals = detectInjectionPatterns(artifactSignalText);
+  const prompt = buildPrompt(job, injectionSignals);
   await runCommand("codex", args, {
     cwd: workspace,
     input: prompt,
@@ -244,18 +298,16 @@ async function runCodex(job: ClaimedJob, workspace: string) {
   const raw = await readFile(resultPath, "utf8");
   const parsed = parseLlmEvalResponse(raw);
   if (!parsed) throw new Error(`Codex result did not match ClawScan schema: ${raw.slice(0, 500)}`);
-  const signalText = `${JSON.stringify(job.target)}\n${raw}`;
-  const result = applyInjectionSignalFloor(parsed, detectInjectionPatterns(signalText));
   return {
-    status: verdictToStatus(result.verdict),
-    verdict: result.verdict,
-    confidence: result.confidence,
-    summary: result.summary,
-    dimensions: result.dimensions,
-    guidance: result.guidance,
-    findings: result.findings || undefined,
-    agenticRiskFindings: result.agenticRiskFindings,
-    riskSummary: result.riskSummary,
+    status: verdictToStatus(parsed.verdict),
+    verdict: parsed.verdict,
+    confidence: parsed.confidence,
+    summary: parsed.summary,
+    dimensions: parsed.dimensions,
+    guidance: parsed.guidance,
+    findings: parsed.findings || undefined,
+    agenticRiskFindings: parsed.agenticRiskFindings,
+    riskSummary: parsed.riskSummary,
     model: process.env.CODEX_SECURITY_SCAN_MODEL ?? "gpt-5.5",
     checkedAt: Date.now(),
   };

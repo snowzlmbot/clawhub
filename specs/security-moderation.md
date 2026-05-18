@@ -114,6 +114,9 @@ See also: [acceptable-usage.md](./acceptable-usage.md) for the marketplace polic
   concerns remain `flagged.suspicious` and are hidden by the suspicious filter.
 - VirusTotal is telemetry only. It is included in the Codex workspace as signal,
   but VT alone must never hide, block, or set malicious/suspicious public status.
+- Prompt-injection pre-scan hits are also context for Codex, not a deterministic
+  post-Codex veto. The release worker must not downgrade a benign Codex verdict
+  solely from regex telemetry.
 - Artifacts without non-VT malicious indications are visible immediately while
   Codex runs. Artifacts with non-VT malicious indications stay hidden/blocked
   until Codex returns; Codex malicious verdicts hide/block.
