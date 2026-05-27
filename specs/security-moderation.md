@@ -218,6 +218,12 @@ See also: [acceptable-usage.md](./acceptable-usage.md) for the marketplace polic
 
 - Banning a user:
   - hard-deletes all owned skills
+  - soft-deletes all owned packages/plugins with a ban-specific reason marker
+    and revokes package publish tokens
+    - the first package batch may run before `users.deletedAt` is committed;
+      later paginated package batches must match the current ban timestamp
+    - packages already hidden by an earlier user ban are retimestamped to the
+      current ban so the next matching unban can restore them
   - retimestamps already ban-hidden owned skills to the current ban marker so
     a later matching unban can restore them
   - soft-deletes all authored skill comments + soul comments
@@ -225,6 +231,8 @@ See also: [acceptable-usage.md](./acceptable-usage.md) for the marketplace polic
   - sets `deletedAt` on the user
 - Admins can manually unban (`deletedAt` + `banReason` cleared); revoked API tokens
   stay revoked and should be recreated by the user.
+- Unban restore batches only restore packages/plugins hidden by the matching
+  ban timestamp and must stop if the user has been banned again.
 - Stale unban restore batches must stop if the user was banned again before a
   later page runs.
 - Optional ban reason is stored in `users.banReason` and audit logs.
