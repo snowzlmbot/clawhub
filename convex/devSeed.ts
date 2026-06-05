@@ -31,6 +31,67 @@ type SeedActionResult = {
 
 type SeedMutationResult = Record<string, unknown>;
 
+const displayManifestStatusValidator = v.union(
+  v.literal("ok"),
+  v.literal("missing"),
+  v.literal("invalid"),
+  v.literal("failed"),
+);
+
+const displayManifestValidator = v.object({
+  notGrouped: v.optional(v.union(v.literal("top"), v.literal("bottom"))),
+  groupings: v.array(
+    v.object({
+      title: v.string(),
+      description: v.optional(v.string()),
+      skills: v.array(v.string()),
+    }),
+  ),
+});
+
+const githubSkillScanStatusValidator = v.union(
+  v.literal("clean"),
+  v.literal("suspicious"),
+  v.literal("malicious"),
+  v.literal("pending"),
+  v.literal("failed"),
+);
+
+type GitHubSkillScanStatus = "clean" | "suspicious" | "malicious" | "pending" | "failed";
+
+type SeedGitHubBackedSkillSourceArgs = {
+  reset?: boolean;
+  ownerUserId?: Id<"users">;
+  repo: string;
+  defaultBranch?: string;
+  displayManifestKind?: "skills.sh";
+  displayManifestHash?: string;
+  displayManifestCommit?: string;
+  displayManifestFetchedAt?: number;
+  displayManifestStatus?: "ok" | "missing" | "invalid" | "failed";
+  displayManifest?: {
+    notGrouped?: "top" | "bottom";
+    groupings: Array<{
+      title: string;
+      description?: string;
+      skills: string[];
+    }>;
+  };
+  skills: Array<{
+    slug: string;
+    displayName: string;
+    summary?: string;
+    githubPath: string;
+    githubCurrentCommit: string;
+    githubCurrentContentHash: string;
+    githubCurrentStatus?: "present" | "missing" | "unknown";
+    githubCurrentCheckedAt?: number;
+    githubScanStatus: GitHubSkillScanStatus;
+    githubRemovedAt?: number;
+    capabilityTags?: string[];
+  }>;
+};
+
 type PublicCorpusDummyOwner = {
   handle: string;
   displayName: string;
@@ -734,7 +795,10 @@ async function seedLocalFixturesHandler(
     },
   );
 
-  return { ok: true, results: [{ slug: "local-moderation-fixtures", ...fixtureResult }] };
+  return {
+    ok: true,
+    results: [{ slug: "local-moderation-fixtures", ...fixtureResult }],
+  };
 }
 
 export const seedLocalFixtures: ReturnType<typeof internalAction> = internalAction({
@@ -2430,6 +2494,268 @@ export const seedLocalModerationFixturesMutation = internalMutation({
     scannedPluginReadme: v.string(),
   },
   handler: seedLocalModerationFixturesHandler,
+});
+
+function githubBackedSkillModeration(scanStatus: GitHubSkillScanStatus, removedAt?: number) {
+  if (typeof removedAt === "number") {
+    return {
+      moderationStatus: "hidden" as const,
+      moderationReason: "github.upstream.removed",
+      moderationVerdict: undefined,
+      moderationFlags: [],
+      isSuspicious: false,
+    };
+  }
+  if (scanStatus === "pending") {
+    return {
+      moderationStatus: "hidden" as const,
+      moderationReason: "pending.scan",
+      moderationVerdict: undefined,
+      moderationFlags: [],
+      isSuspicious: false,
+    };
+  }
+  if (scanStatus === "failed") {
+    return {
+      moderationStatus: "hidden" as const,
+      moderationReason: "scanner.failed",
+      moderationVerdict: undefined,
+      moderationFlags: [],
+      isSuspicious: false,
+    };
+  }
+  if (scanStatus === "malicious") {
+    return {
+      moderationStatus: "hidden" as const,
+      moderationReason: "scanner.llm.malicious",
+      moderationVerdict: "malicious" as const,
+      moderationFlags: ["blocked.malware"],
+      isSuspicious: true,
+    };
+  }
+  if (scanStatus === "suspicious") {
+    return {
+      moderationStatus: "active" as const,
+      moderationReason: "scanner.llm.suspicious",
+      moderationVerdict: "suspicious" as const,
+      moderationFlags: ["flagged.suspicious"],
+      isSuspicious: true,
+    };
+  }
+  return {
+    moderationStatus: "active" as const,
+    moderationReason: undefined,
+    moderationVerdict: "clean" as const,
+    moderationFlags: [],
+    isSuspicious: false,
+  };
+}
+
+export async function seedGitHubBackedSkillSourceHandler(
+  ctx: MutationCtx,
+  args: SeedGitHubBackedSkillSourceArgs,
+) {
+  const now = Date.now();
+  const { userId, publisherId } = await ensureSeedOwner(ctx, args.ownerUserId);
+  const existingSource = await ctx.db
+    .query("githubSkillSources")
+    .withIndex("by_repo", (q) => q.eq("repo", args.repo))
+    .unique();
+  const sourcePatch = {
+    repo: args.repo,
+    ownerPublisherId: publisherId,
+    defaultBranch: args.defaultBranch,
+    displayManifestKind: args.displayManifestKind,
+    displayManifestHash: args.displayManifestHash,
+    displayManifestCommit: args.displayManifestCommit,
+    displayManifestFetchedAt: args.displayManifestFetchedAt,
+    displayManifestStatus: args.displayManifestStatus,
+    displayManifest: args.displayManifest,
+    updatedAt: now,
+  };
+  const sourceId =
+    existingSource?._id ??
+    (await ctx.db.insert("githubSkillSources", {
+      ...sourcePatch,
+      createdAt: now,
+    }));
+  if (existingSource) await ctx.db.patch(existingSource._id, sourcePatch);
+
+  const seeded: string[] = [];
+  const skipped: string[] = [];
+
+  for (const spec of args.skills) {
+    const existing = await ctx.db
+      .query("skills")
+      .withIndex("by_slug", (q) => q.eq("slug", spec.slug))
+      .unique();
+    if (existing && !args.reset) {
+      skipped.push(spec.slug);
+      continue;
+    }
+    if (existing && args.reset) await deleteSkillAndVersions(ctx, existing._id);
+
+    const moderation = githubBackedSkillModeration(spec.githubScanStatus, spec.githubRemovedAt);
+    const skillId = await ctx.db.insert("skills", {
+      slug: spec.slug,
+      displayName: spec.displayName,
+      summary: spec.summary,
+      ownerUserId: userId,
+      ownerPublisherId: publisherId,
+      installKind: "github",
+      githubSourceId: sourceId,
+      githubPath: spec.githubPath,
+      githubCurrentCommit: spec.githubCurrentCommit,
+      githubCurrentContentHash: spec.githubCurrentContentHash,
+      githubCurrentStatus:
+        spec.githubCurrentStatus ?? (spec.githubRemovedAt ? "missing" : "present"),
+      githubCurrentCheckedAt: spec.githubCurrentCheckedAt,
+      githubScanStatus: spec.githubScanStatus,
+      githubRemovedAt: spec.githubRemovedAt,
+      latestVersionId: undefined,
+      latestVersionSummary: undefined,
+      tags: {},
+      capabilityTags: spec.capabilityTags ?? [],
+      softDeletedAt: undefined,
+      badges: { highlighted: { byUserId: userId, at: now }, redactionApproved: undefined },
+      moderationStatus: moderation.moderationStatus,
+      moderationReason: moderation.moderationReason,
+      moderationVerdict: moderation.moderationVerdict,
+      moderationFlags: moderation.moderationFlags,
+      isSuspicious: moderation.isSuspicious,
+      statsDownloads: 0,
+      statsStars: 0,
+      statsInstallsCurrent: 0,
+      statsInstallsAllTime: 0,
+      stats: {
+        downloads: 0,
+        installsCurrent: 0,
+        installsAllTime: 0,
+        stars: 0,
+        versions: 0,
+        comments: 0,
+      },
+      createdAt: now,
+      updatedAt: now,
+    });
+    await ensureHighlightedSkillBadge(ctx, skillId, userId, now);
+    seeded.push(spec.slug);
+  }
+
+  return {
+    ok: true,
+    sourceId,
+    ownerUserId: userId,
+    ownerPublisherId: publisherId,
+    seeded,
+    skipped,
+  };
+}
+
+export const seedGitHubBackedSkillSourceMutation = internalMutation({
+  args: {
+    reset: v.optional(v.boolean()),
+    ownerUserId: v.optional(v.id("users")),
+    repo: v.string(),
+    defaultBranch: v.optional(v.string()),
+    displayManifestKind: v.optional(v.literal("skills.sh")),
+    displayManifestHash: v.optional(v.string()),
+    displayManifestCommit: v.optional(v.string()),
+    displayManifestFetchedAt: v.optional(v.number()),
+    displayManifestStatus: v.optional(displayManifestStatusValidator),
+    displayManifest: v.optional(displayManifestValidator),
+    skills: v.array(
+      v.object({
+        slug: v.string(),
+        displayName: v.string(),
+        summary: v.optional(v.string()),
+        githubPath: v.string(),
+        githubCurrentCommit: v.string(),
+        githubCurrentContentHash: v.string(),
+        githubCurrentStatus: v.optional(
+          v.union(v.literal("present"), v.literal("missing"), v.literal("unknown")),
+        ),
+        githubCurrentCheckedAt: v.optional(v.number()),
+        githubScanStatus: githubSkillScanStatusValidator,
+        githubRemovedAt: v.optional(v.number()),
+        capabilityTags: v.optional(v.array(v.string())),
+      }),
+    ),
+  },
+  handler: seedGitHubBackedSkillSourceHandler,
+});
+
+export const seedGitHubSourceInvalidSkillsPreviewMutation = internalMutation({
+  args: {
+    repo: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const source = await ctx.db
+      .query("githubSkillSources")
+      .withIndex("by_repo", (q) => q.eq("repo", args.repo))
+      .unique();
+
+    if (!source) {
+      return { ok: false as const, reason: "source_not_found" as const };
+    }
+
+    const overlongSlug = "preview-" + "x".repeat(97);
+    await ctx.db.patch(source._id, {
+      lastSyncInvalidSkills: [
+        {
+          slug: overlongSlug,
+          path: `skills/${overlongSlug}`,
+          displayName: "Preview Invalid Skill",
+          error: "Slug must be at most 96 characters.",
+        },
+      ],
+      updatedAt: Date.now(),
+    });
+
+    return { ok: true as const, sourceId: source._id };
+  },
+});
+
+export const deleteGitHubBackedSkillSourceSeedMutation = internalMutation({
+  args: {
+    repo: v.optional(v.string()),
+    sourceId: v.optional(v.id("githubSkillSources")),
+  },
+  handler: async (ctx, args) => {
+    const source = args.sourceId
+      ? await ctx.db.get(args.sourceId)
+      : args.repo
+        ? await ctx.db
+            .query("githubSkillSources")
+            .withIndex("by_repo", (q) => q.eq("repo", args.repo as string))
+            .unique()
+        : null;
+    const sourceId = source?._id ?? args.sourceId;
+    if (!sourceId) {
+      return { ok: true as const, deletedSource: false, deletedSkills: 0, deletedContents: 0 };
+    }
+
+    const contents = await ctx.db
+      .query("githubSkillContents")
+      .withIndex("by_github_source", (q) => q.eq("githubSourceId", sourceId))
+      .collect();
+    for (const content of contents) await ctx.db.delete(content._id);
+
+    const skills = await ctx.db
+      .query("skills")
+      .withIndex("by_github_source", (q) => q.eq("githubSourceId", sourceId))
+      .collect();
+    for (const skill of skills) await deleteSkillAndVersions(ctx, skill._id);
+
+    if (source) await ctx.db.delete(source._id);
+
+    return {
+      ok: true as const,
+      deletedSource: Boolean(source),
+      deletedSkills: skills.length,
+      deletedContents: contents.length,
+    };
+  },
 });
 
 export const seedFeaturedPluginPackagesMutation = internalMutation({

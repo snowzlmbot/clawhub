@@ -120,6 +120,7 @@ describe("DevPersonaFab", () => {
     ["owner", /use owner/i],
     ["user", /use user/i],
     ["admin", /use admin/i],
+    ["officialOrgMember", /use org member/i],
   ] as const)("signs in with the %s local persona", async (persona, label) => {
     render(<DevPersonaFab />);
 

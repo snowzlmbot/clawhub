@@ -11,6 +11,12 @@ import {
   isReservedPublicOwnerHandle,
 } from "./lib/publicRouteReservations";
 import {
+  buildGitHubSkillCatalogDisplay,
+  type GitHubSkillCatalogDisplay,
+  type GitHubSkillCatalogItem,
+  type GitHubSkillCatalogSource,
+} from "./lib/publisherCatalogDisplay";
+import {
   canAccessPublisherOwnerScope,
   ensurePersonalPublisherForUser,
   getActiveUserByHandleOrPersonalPublisher,
@@ -27,6 +33,7 @@ import { readCanonicalStat } from "./lib/skillStats";
 const PUBLISHER_HANDLE_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/;
 const MAX_PUBLIC_PUBLISHER_LIST_LIMIT = 500;
 const PUBLISHER_LIST_PREVIEW_LIMIT = 3;
+const PUBLISHER_LIST_PREVIEW_FETCH_LIMIT = 24;
 const publisherRoleValidator = v.union(
   v.literal("owner"),
   v.literal("admin"),
@@ -50,6 +57,7 @@ type PublisherPublishedItem = {
 type PublisherCatalogItem = {
   _id: Id<"skills"> | Id<"packages">;
   kind: "skill" | "plugin";
+  slug?: string;
   displayName: string;
   summary: string | null;
   // Mirrors `skills.icon` for `kind: "skill"` items so the publisher
@@ -62,6 +70,11 @@ type PublisherCatalogItem = {
   stars: number;
   isOfficial: boolean;
   updatedAt: number;
+  sourceBacked?: boolean;
+  sourceId?: Id<"githubSkillSources"> | null;
+  sourceRepo?: string | null;
+  sourcePath?: string | null;
+  sourceVerifiedCommit?: string | null;
 };
 
 type PublisherCatalogSort = "downloads" | "recent";
@@ -80,6 +93,10 @@ type PublisherListSummary = {
   publisher: Doc<"publishers">;
   item: PublisherListItem;
 };
+
+function isPublicPublishedSkill(skill: Doc<"skills">) {
+  return !skill.softDeletedAt && (!skill.moderationStatus || skill.moderationStatus === "active");
+}
 
 type PublicPublisherKindFilter = "user" | "org";
 type PublisherListCounts = {
@@ -171,7 +188,7 @@ async function getPublisherPublishedRows(
       )
       .collect(),
   ]);
-  return { skills, packages };
+  return { skills: skills.filter(isPublicPublishedSkill), packages };
 }
 
 async function getPublisherPublishedPreviewRows(
@@ -179,13 +196,7 @@ async function getPublisherPublishedPreviewRows(
   publisherId: Id<"publishers">,
 ): Promise<PublisherPublishedRows> {
   const [skills, packages] = await Promise.all([
-    ctx.db
-      .query("skills")
-      .withIndex("by_owner_publisher_active_downloads", (q) =>
-        q.eq("ownerPublisherId", publisherId).eq("softDeletedAt", undefined),
-      )
-      .order("desc")
-      .take(PUBLISHER_LIST_PREVIEW_LIMIT),
+    getPublisherPublishedPreviewSkills(ctx, publisherId),
     ctx.db
       .query("packages")
       .withIndex("by_owner_publisher_active_downloads", (q) =>
@@ -195,6 +206,31 @@ async function getPublisherPublishedPreviewRows(
       .take(PUBLISHER_LIST_PREVIEW_LIMIT),
   ]);
   return { skills, packages };
+}
+
+async function getPublisherPublishedPreviewSkills(
+  ctx: Pick<QueryCtx, "db">,
+  publisherId: Id<"publishers">,
+) {
+  const skills: Doc<"skills">[] = [];
+  let cursor: string | null = null;
+  while (skills.length < PUBLISHER_LIST_PREVIEW_LIMIT) {
+    const page = await ctx.db
+      .query("skills")
+      .withIndex("by_owner_publisher_active_downloads", (q) =>
+        q.eq("ownerPublisherId", publisherId).eq("softDeletedAt", undefined),
+      )
+      .order("desc")
+      .paginate({ cursor, numItems: PUBLISHER_LIST_PREVIEW_FETCH_LIMIT });
+    for (const skill of page.page) {
+      if (!isPublicPublishedSkill(skill)) continue;
+      skills.push(skill);
+      if (skills.length >= PUBLISHER_LIST_PREVIEW_LIMIT) break;
+    }
+    if (page.isDone) break;
+    cursor = page.continueCursor;
+  }
+  return skills;
 }
 
 function getIndexedPublisherStatsFromRows(rows: PublisherPublishedRows): PublisherListStats {
@@ -277,6 +313,7 @@ function getPublisherCatalogItems(
     ...rows.skills.map((skill) => ({
       _id: skill._id,
       kind: "skill" as const,
+      slug: skill.slug,
       displayName: skill.displayName,
       summary: skill.summary ?? null,
       icon: skill.icon ?? null,
@@ -285,6 +322,10 @@ function getPublisherCatalogItems(
       stars: readCanonicalStat(skill, "stars"),
       isOfficial: publisherOfficial || Boolean(skill.badges?.official),
       updatedAt: skill.updatedAt,
+      sourceBacked: skill.installKind === "github",
+      sourceId: skill.githubSourceId ?? null,
+      sourceRepo: null,
+      sourcePath: skill.githubPath ?? null,
     })),
     ...rows.packages.map((pkg) => ({
       _id: pkg._id,
@@ -299,6 +340,40 @@ function getPublisherCatalogItems(
       updatedAt: pkg.updatedAt,
     })),
   ].sort(comparePublisherCatalogItems(sort));
+}
+
+function toGitHubSkillCatalogSource(source: Doc<"githubSkillSources">): GitHubSkillCatalogSource {
+  return {
+    _id: source._id,
+    repo: source.repo,
+    displayManifestStatus: source.displayManifestStatus,
+    displayManifest: source.displayManifest,
+  };
+}
+
+function toGitHubSkillCatalogItem(
+  item: PublisherCatalogItem,
+  sourceById: Map<string, Doc<"githubSkillSources">>,
+): GitHubSkillCatalogItem {
+  const sourceId = item.sourceId ? String(item.sourceId) : null;
+  return {
+    _id: String(item._id),
+    kind: item.kind,
+    slug: item.slug ?? null,
+    displayName: item.displayName,
+    summary: item.summary,
+    icon: item.icon,
+    href: item.href,
+    downloads: item.downloads,
+    stars: item.stars,
+    isOfficial: item.isOfficial,
+    updatedAt: item.updatedAt,
+    sourceBacked: item.sourceBacked ?? false,
+    sourceId,
+    sourceRepo: sourceId ? (sourceById.get(sourceId)?.repo ?? null) : null,
+    sourcePath: item.sourcePath ?? null,
+    sourceVerifiedCommit: item.sourceVerifiedCommit ?? null,
+  };
 }
 
 async function toPublisherListItem(
@@ -1172,6 +1247,44 @@ export const listPublishedPage = query({
       continueCursor: nextOffset < items.length ? String(nextOffset) : "",
       isDone: nextOffset >= items.length,
     };
+  },
+});
+
+export const getPublishedDisplayManifest = query({
+  args: {
+    handle: v.string(),
+    kind: v.optional(v.union(v.literal("skill"), v.literal("plugin"))),
+    sort: v.optional(v.union(v.literal("downloads"), v.literal("recent"))),
+  },
+  handler: async (ctx, args): Promise<GitHubSkillCatalogDisplay | null> => {
+    if (args.kind === "plugin") return null;
+
+    const publisher = await getPublisherByHandle(ctx, args.handle);
+    if (!publisher || publisher.deletedAt || publisher.deactivatedAt) return null;
+
+    const sources = await ctx.db
+      .query("githubSkillSources")
+      .withIndex("by_owner_publisher", (q) => q.eq("ownerPublisherId", publisher._id))
+      .collect();
+    if (sources.length === 0) return null;
+
+    const rows = await getPublisherPublishedRows(ctx, publisher._id);
+    if (!args.kind && rows.packages.length > 0) return null;
+
+    const sourceById = new Map(sources.map((source) => [String(source._id), source]));
+    const items = getPublisherCatalogItems(
+      publisher,
+      rows,
+      await isOfficialPublisher(ctx, publisher),
+      args.sort ?? "downloads",
+    )
+      .filter((item) => !args.kind || item.kind === args.kind)
+      .map((item) => toGitHubSkillCatalogItem(item, sourceById));
+
+    return buildGitHubSkillCatalogDisplay({
+      sources: sources.map(toGitHubSkillCatalogSource),
+      items,
+    });
   },
 });
 

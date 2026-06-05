@@ -21,6 +21,12 @@ import { getOptionalApiTokenUserId, requireApiTokenUser } from "../lib/apiTokenA
 import { mergeHeaders } from "../lib/httpHeaders";
 import { applyRateLimit } from "../lib/httpRateLimit";
 import { parseBooleanQueryParam, resolveBooleanQueryParam } from "../lib/httpUtils";
+import {
+  buildSkillInstallResolution,
+  type InstallResolverSkill,
+  type InstallResolverSource,
+  type SkillInstallResolution,
+} from "../lib/installResolver";
 import type {
   LlmAgenticRiskFinding,
   LlmEvalDimension,
@@ -284,6 +290,9 @@ type SkillSecuritySnapshot = {
 };
 
 const internalRefs = internal as unknown as {
+  githubSkillSources: {
+    getByIdInternal: unknown;
+  };
   securityScan: {
     createUploadedSkillScanRequestInternal: unknown;
     createPublishedSkillScanRequestInternal: unknown;
@@ -297,6 +306,7 @@ const internalRefs = internal as unknown as {
   };
   skills: {
     getSecurityVerdictTargetInternal: unknown;
+    getSkillBySlugInternal: unknown;
     reportSkillForUserInternal: unknown;
     listSkillReportsInternal: unknown;
     triageSkillReportForUserInternal: unknown;
@@ -1466,6 +1476,25 @@ async function describeOwnerVisibleSkillState(
   return null;
 }
 
+function shouldExposeHiddenGitHubInstallBlock(
+  skill: InstallResolverSkill & {
+    installKind?: "github";
+    moderationStatus?: "active" | "hidden" | "removed";
+    moderationReason?: string;
+  },
+  resolution: SkillInstallResolution,
+) {
+  if (skill.installKind !== "github" || resolution.ok) return false;
+  if (skill.moderationStatus !== "hidden") return false;
+  const reason = skill.moderationReason ?? "";
+  return (
+    reason === "pending.scan" ||
+    reason === "scanner.failed" ||
+    reason === "scanner.llm.malicious" ||
+    reason.startsWith("github.")
+  );
+}
+
 export async function skillsGetRouterV1Handler(ctx: ActionCtx, request: Request) {
   const rate = await applyRateLimit(ctx, request, "read");
   if (!rate.ok) return rate.response;
@@ -1528,6 +1557,60 @@ export async function skillsGetRouterV1Handler(ctx: ActionCtx, request: Request)
       limit: toOptionalNumber(url.searchParams.get("limit")),
     });
     return json(result, 200, rate.headers);
+  }
+
+  if (second === "install" && segments.length === 2) {
+    const url = new URL(request.url);
+    const forceInstall = parseBooleanQueryParam(url.searchParams.get("forceInstall"));
+    const skill = (await runQueryRef<
+      | (InstallResolverSkill & {
+          _id: Id<"skills">;
+          githubSourceId?: Id<"githubSkillSources">;
+          softDeletedAt?: number;
+          moderationStatus?: "active" | "hidden" | "removed";
+          moderationReason?: string;
+          moderationFlags?: string[];
+        })
+      | null
+    >(ctx, internalRefs.skills.getSkillBySlugInternal, { slug })) as
+      | (InstallResolverSkill & {
+          _id: Id<"skills">;
+          githubSourceId?: Id<"githubSkillSources">;
+          softDeletedAt?: number;
+          moderationStatus?: "active" | "hidden" | "removed";
+          moderationReason?: string;
+          moderationFlags?: string[];
+        })
+      | null;
+    if (!skill || skill.softDeletedAt || skill.moderationStatus === "removed") {
+      return text("Skill not found", 404, rate.headers);
+    }
+
+    const source =
+      skill.installKind === "github" && skill.githubSourceId
+        ? ((await runQueryRef(ctx, internalRefs.githubSkillSources.getByIdInternal, {
+            sourceId: skill.githubSourceId,
+          })) as InstallResolverSource | null)
+        : null;
+    const resolution = buildSkillInstallResolution({
+      origin: publicApiOrigin(request),
+      skill,
+      source,
+      forceInstall,
+    });
+
+    const publicSkillResult = (await ctx.runQuery(api.skills.getBySlug, {
+      slug,
+    })) as GetBySlugResult;
+    const publiclyVisible = publicSkillResult?.skill?._id === skill._id;
+    if (!publiclyVisible) {
+      if (!resolution.ok && shouldExposeHiddenGitHubInstallBlock(skill, resolution)) {
+        return json(resolution, resolution.status, rate.headers);
+      }
+      return text("Skill not found", 404, rate.headers);
+    }
+
+    return json(resolution, resolution.ok ? 200 : resolution.status, rate.headers);
   }
 
   if (segments.length === 1) {
