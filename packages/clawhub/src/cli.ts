@@ -27,6 +27,7 @@ import {
   cmdReportPackage,
   cmdTransferPackage,
   cmdUndeletePackage,
+  cmdValidatePackage,
   cmdVerifyPackage,
 } from "./cli/commands/packages.js";
 import { cmdPublish } from "./cli/commands/publish.js";
@@ -571,6 +572,20 @@ registerCommand(packageCmd, ["package", "verify"])
       ...options,
       packageName: options.package,
     });
+  });
+
+registerCommand(packageCmd, ["package", "validate"])
+  .description("Validate a local plugin package with the bundled Plugin Inspector")
+  .argument("<source>", "Package folder path")
+  .option("--out <dir>", "Directory for Plugin Inspector reports", "reports")
+  .option("--openclaw <path>", "Optional local OpenClaw checkout to inspect against")
+  .option("--runtime", "Enable runtime capture; imports plugin code")
+  .option("--allow-execute", "Allow runtime capture in an isolated workspace")
+  .option("--no-mock-sdk", "Disable mocked OpenClaw SDK during runtime capture")
+  .option("--json", "Output JSON")
+  .action(async (source, options) => {
+    const opts = await resolveGlobalOpts();
+    await cmdValidatePackage(opts, source, options);
   });
 
 registerCommand(packageCmd, ["package", "delete"])

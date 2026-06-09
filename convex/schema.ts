@@ -1313,6 +1313,57 @@ const packageReleases = defineTable({
   .index("by_package_version", ["packageId", "version"])
   .index("by_sha256hash", ["sha256hash"]);
 
+const packageInspectorWarnings = defineTable({
+  packageId: v.id("packages"),
+  releaseId: v.id("packageReleases"),
+  ownerUserId: v.id("users"),
+  ownerPublisherId: v.optional(v.id("publishers")),
+  packageName: v.string(),
+  version: v.string(),
+  findingKind: v.optional(v.union(v.literal("warning"), v.literal("error"))),
+  scanSource: v.optional(v.union(v.literal("publish"), v.literal("nightly"))),
+  inspectorVersion: v.optional(v.string()),
+  targetOpenClawVersion: v.optional(v.string()),
+  code: v.string(),
+  severity: v.optional(v.string()),
+  level: v.optional(v.string()),
+  issueClass: v.optional(v.string()),
+  compatStatus: v.optional(v.string()),
+  deprecated: v.optional(v.boolean()),
+  message: v.string(),
+  evidence: v.optional(v.array(v.string())),
+  fixture: v.optional(v.string()),
+  decision: v.optional(v.string()),
+  inspectorFindingId: v.optional(v.string()),
+  createdAt: v.number(),
+})
+  .index("by_package_created", ["packageId", "createdAt"])
+  .index("by_release", ["releaseId"])
+  .index("by_release_created", ["releaseId", "createdAt"])
+  .index("by_owner_user_created", ["ownerUserId", "createdAt"])
+  .index("by_owner_publisher_created", ["ownerPublisherId", "createdAt"]);
+
+const packageInspectorFindingNotifications = defineTable({
+  packageId: v.id("packages"),
+  releaseId: v.id("packageReleases"),
+  ownerUserId: v.id("users"),
+  ownerPublisherId: v.optional(v.id("publishers")),
+  packageName: v.string(),
+  version: v.string(),
+  email: v.string(),
+  findingCount: v.number(),
+  sentAt: v.number(),
+})
+  .index("by_release", ["releaseId"])
+  .index("by_owner_user_sent", ["ownerUserId", "sentAt"]);
+
+const packageInspectorScanCursors = defineTable({
+  name: v.string(),
+  cursor: v.optional(v.union(v.string(), v.null())),
+  leaseExpiresAt: v.optional(v.number()),
+  updatedAt: v.number(),
+}).index("by_name", ["name"]);
+
 const securityScanJobs = defineTable({
   targetKind: securityScanTargetKindValidator,
   skillVersionId: v.optional(v.id("skillVersions")),
@@ -2479,6 +2530,9 @@ export default defineSchema({
   skillSlugAliases,
   packages,
   packageReleases,
+  packageInspectorWarnings,
+  packageInspectorFindingNotifications,
+  packageInspectorScanCursors,
   securityScanJobs,
   skillScanRequests,
   skillCardGenerationJobs,

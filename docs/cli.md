@@ -404,6 +404,28 @@ clawhub package verify ./example-plugin-1.2.3.tgz --package @openclaw/example-pl
 clawhub package verify ./example-plugin-1.2.3.tgz --sha256 <hex>
 ```
 
+### `package validate <source>`
+
+- Runs the ClawHub CLI's bundled Plugin Inspector against a local plugin package
+  folder.
+- Defaults to offline/static validation, without locating or importing a local
+  OpenClaw checkout.
+- Hard compatibility errors exit non-zero. Warning-only findings are printed but
+  exit zero.
+- Flags:
+  - `--out <dir>`: write Plugin Inspector reports to this directory.
+  - `--openclaw <path>`: inspect against an explicit local OpenClaw checkout.
+  - `--runtime`: enable runtime capture; imports plugin code.
+  - `--allow-execute`: allow runtime capture in an isolated workspace.
+  - `--no-mock-sdk`: disable mocked OpenClaw SDK during runtime capture.
+  - `--json`: machine-readable output.
+
+Example:
+
+```bash
+clawhub package validate ./example-plugin
+```
+
 ### `package delete <name>`
 
 - Soft-deletes a package and all releases.

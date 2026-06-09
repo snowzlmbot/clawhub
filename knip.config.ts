@@ -14,6 +14,8 @@ const config = {
     ".vercel/**",
     "coverage/**",
     "dist/**",
+    // Template contract for the planned Resend integration; intentionally not called yet.
+    "src/lib/packageInspectorEmailTemplates.ts",
     "src/routeTree.gen.ts",
     "convex/_generated/**",
     "packages/*/dist/**",

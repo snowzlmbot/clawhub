@@ -19,6 +19,18 @@ const authTokenMocks = createAuthTokenModuleMocks();
 const registryMocks = createRegistryModuleMocks();
 const httpMocks = createHttpModuleMocks();
 const uiMocks = createUiModuleMocks();
+const inspectorMocks = {
+  pluginRoot: {
+    runCheck: vi.fn(),
+  },
+  reports: {
+    renderTextSummary: vi.fn((report: { status?: string }) => `Plugin Inspector: ${report.status}`),
+    sanitizeArtifact: vi.fn((report: unknown) => report),
+  },
+  ci: {
+    writeOutputs: vi.fn(),
+  },
+};
 const originalOidcRequestUrl = process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
 const originalOidcRequestToken = process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;
 
@@ -26,6 +38,7 @@ vi.mock("../../http.js", () => httpMocks.moduleFactory());
 vi.mock("../registry.js", () => registryMocks.moduleFactory());
 vi.mock("../authToken.js", () => authTokenMocks.moduleFactory());
 vi.mock("../ui.js", () => uiMocks.moduleFactory());
+vi.mock("@openclaw/plugin-inspector", () => inspectorMocks);
 
 const {
   cmdDeletePackage,
@@ -41,6 +54,7 @@ const {
   cmdReportPackage,
   cmdTransferPackage,
   cmdUndeletePackage,
+  cmdValidatePackage,
   cmdVerifyPackage,
 } = await import("./packages");
 const {
@@ -214,6 +228,100 @@ afterEach(() => {
 });
 
 describe("package commands", () => {
+  it("validates a local plugin package with bundled Plugin Inspector offline", async () => {
+    const workdir = await makeTmpWorkdir();
+    try {
+      const folder = join(workdir, "demo-plugin");
+      await mkdir(folder, { recursive: true });
+      await writeFile(join(folder, "package.json"), '{"name":"demo-plugin","version":"1.0.0"}\n');
+
+      inspectorMocks.pluginRoot.runCheck.mockResolvedValueOnce({
+        report: { status: "pass", summary: { breakageCount: 0 } },
+        paths: { jsonPath: join(folder, "reports", "plugin-inspector-report.json") },
+      });
+
+      await cmdValidatePackage(makeOpts(workdir), "demo-plugin", {});
+
+      expect(inspectorMocks.pluginRoot.runCheck).toHaveBeenCalledWith(
+        expect.objectContaining({
+          allowExecution: false,
+          capture: false,
+          configPath: expect.stringContaining("plugin-inspector.config.json"),
+          mockSdk: true,
+          openclawPath: false,
+          outDir: "reports",
+          pluginRoot: folder,
+        }),
+      );
+      expect(inspectorMocks.ci.writeOutputs).toHaveBeenCalledWith(
+        { status: "pass", summary: { breakageCount: 0 } },
+        { cwd: join(folder, "reports"), outDir: "." },
+      );
+      expect(mockLog).toHaveBeenCalledWith("Plugin Inspector: pass");
+    } finally {
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails package validation when Plugin Inspector reports hard breakages", async () => {
+    const workdir = await makeTmpWorkdir();
+    try {
+      const folder = join(workdir, "broken-plugin");
+      await mkdir(folder, { recursive: true });
+      await writeFile(join(folder, "package.json"), '{"name":"broken-plugin","version":"1.0.0"}\n');
+      inspectorMocks.pluginRoot.runCheck.mockResolvedValueOnce({
+        report: { status: "fail", summary: { breakageCount: 1 } },
+        paths: { jsonPath: join(folder, "reports", "plugin-inspector-report.json") },
+      });
+
+      await expect(cmdValidatePackage(makeOpts(workdir), "broken-plugin", {})).rejects.toThrow(
+        "Plugin Inspector found 1 hard error",
+      );
+
+      expect(mockLog).toHaveBeenCalledWith("Plugin Inspector: fail");
+    } finally {
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
+  it("prints package validation JSON from the sanitized Plugin Inspector report", async () => {
+    const workdir = await makeTmpWorkdir();
+    try {
+      const folder = join(workdir, "warning-plugin");
+      await mkdir(folder, { recursive: true });
+      await writeFile(
+        join(folder, "package.json"),
+        '{"name":"warning-plugin","version":"1.0.0"}\n',
+      );
+      const report = {
+        status: "pass",
+        summary: { breakageCount: 0, warningCount: 1 },
+        issues: [{ code: "legacy-hook", level: "warning" }],
+      };
+      inspectorMocks.pluginRoot.runCheck.mockResolvedValueOnce({
+        report,
+        paths: { jsonPath: join(folder, "reports", "plugin-inspector-report.json") },
+      });
+      inspectorMocks.reports.sanitizeArtifact.mockReturnValueOnce({
+        status: "pass",
+        issues: [{ code: "legacy-hook", level: "warning" }],
+      });
+
+      await cmdValidatePackage(makeOpts(workdir), "warning-plugin", { json: true });
+
+      expect(mockWrite).toHaveBeenCalledWith(
+        `${JSON.stringify(
+          { status: "pass", issues: [{ code: "legacy-hook", level: "warning" }] },
+          null,
+          2,
+        )}\n`,
+      );
+      expect(mockLog).not.toHaveBeenCalled();
+    } finally {
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
   it("searches package catalog via /api/v1/packages/search", async () => {
     httpMocks.apiRequest.mockResolvedValueOnce({
       results: [
@@ -2170,6 +2278,99 @@ describe("package commands", () => {
       expect(uiMocks.spinner.succeed).not.toHaveBeenCalled();
       expect(mockLog).not.toHaveBeenCalled();
       expect(mockWrite).not.toHaveBeenCalled();
+    } finally {
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails CLI publish on server Plugin Inspector hard errors", async () => {
+    const workdir = await makeTmpWorkdir();
+    try {
+      const folder = join(workdir, "broken-plugin");
+      await mkdir(join(folder, "dist"), { recursive: true });
+      await writeFile(
+        join(folder, "package.json"),
+        makeCodePluginPackageJson({
+          name: "broken-plugin",
+          displayName: "Broken Plugin",
+          version: "1.0.0",
+        }),
+        "utf8",
+      );
+      await writeFile(
+        join(folder, "openclaw.plugin.json"),
+        JSON.stringify({ id: "broken.plugin" }),
+      );
+      await writeFile(join(folder, "dist", "index.js"), "export const demo = true;\n", "utf8");
+
+      httpMocks.apiRequestForm.mockRejectedValueOnce(
+        new Error(
+          "Plugin Inspector blocked publish: missing-expected-seam: missing expected registration registerTool",
+        ),
+      );
+
+      await expect(
+        cmdPublishPackage(makeOpts(workdir), "broken-plugin", {
+          sourceRepo: "openclaw/broken-plugin",
+          sourceCommit: "deadbeef",
+        }),
+      ).rejects.toThrow("Plugin Inspector blocked publish");
+
+      expect(uiMocks.spinner.fail).toHaveBeenCalledWith(
+        "Plugin Inspector blocked publish: missing-expected-seam: missing expected registration registerTool",
+      );
+      expect(uiMocks.spinner.succeed).not.toHaveBeenCalled();
+    } finally {
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
+  it("prints Plugin Inspector warnings for successful CLI publishes", async () => {
+    const workdir = await makeTmpWorkdir();
+    try {
+      const folder = join(workdir, "warning-plugin");
+      await mkdir(join(folder, "dist"), { recursive: true });
+      await writeFile(
+        join(folder, "package.json"),
+        makeCodePluginPackageJson({
+          name: "warning-plugin",
+          displayName: "Warning Plugin",
+          version: "1.0.0",
+        }),
+        "utf8",
+      );
+      await writeFile(
+        join(folder, "openclaw.plugin.json"),
+        JSON.stringify({ id: "warning.plugin" }),
+      );
+      await writeFile(join(folder, "dist", "index.js"), "export const demo = true;\n", "utf8");
+
+      httpMocks.apiRequestForm.mockResolvedValueOnce({
+        ok: true,
+        packageId: "pkg_1",
+        releaseId: "rel_1",
+        inspectorFindings: [
+          {
+            findingKind: "warning",
+            code: "legacy-before-agent-start",
+            issueClass: "deprecation-warning",
+            message: "legacy before_agent_start hook is deprecated",
+          },
+        ],
+      });
+
+      await cmdPublishPackage(makeOpts(workdir), "warning-plugin", {
+        sourceRepo: "openclaw/warning-plugin",
+        sourceCommit: "abc123",
+      });
+
+      expect(uiMocks.spinner.succeed).toHaveBeenCalledWith(
+        "OK. Published warning-plugin@1.0.0 (rel_1)",
+      );
+      expect(mockLog).toHaveBeenCalledWith("Plugin Inspector findings: 1 warning");
+      expect(mockLog).toHaveBeenCalledWith(
+        "- WARNING legacy-before-agent-start (deprecation-warning): legacy before_agent_start hook is deprecated",
+      );
     } finally {
       await rm(workdir, { recursive: true, force: true });
     }

@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { ci, pluginRoot, reports } from "@openclaw/plugin-inspector";
 import ignore from "ignore";
 import mime from "mime";
 import semver from "semver";
@@ -25,6 +26,7 @@ import {
   ApiV1PackageListResponseSchema,
   ApiV1PackageModerationStatusResponseSchema,
   ApiV1PackagePublishResponseSchema,
+  type ApiV1PackagePublishResponse,
   ApiV1PackageReadinessResponseSchema,
   ApiV1PackageReportResponseSchema,
   ApiV1PackageResponseSchema,
@@ -118,6 +120,15 @@ type PackagePublishOptions = {
 
 type PackagePackOptions = {
   packDestination?: string;
+  json?: boolean;
+};
+
+type PackageValidateOptions = {
+  out?: string;
+  openclaw?: string;
+  runtime?: boolean;
+  allowExecute?: boolean;
+  mockSdk?: boolean;
   json?: boolean;
 };
 
@@ -575,6 +586,124 @@ export async function cmdPackPackage(
   }
 }
 
+export async function cmdValidatePackage(
+  opts: GlobalOpts,
+  sourceArg: string,
+  options: PackageValidateOptions = {},
+) {
+  if (!sourceArg?.trim()) fail("Path required");
+  const resolvedSource = await resolveSourceInput(sourceArg, {
+    workdir: opts.workdir,
+    localWorkdirs: [process.cwd(), opts.workdir],
+  });
+  if (resolvedSource.kind !== "local") fail("Path must be a package folder");
+  const sourcePath = resolvedSource.path;
+  const sourceStat = await stat(sourcePath).catch(() => null);
+  if (!sourceStat?.isDirectory()) fail("Path must be a package folder");
+
+  const outDir = options.out?.trim() || "reports";
+  const openclawPath = options.openclaw?.trim() ? resolve(opts.workdir, options.openclaw) : false;
+  const generatedConfig = await createPluginInspectorConfigIfNeeded(sourcePath);
+  let report: Awaited<ReturnType<typeof pluginRoot.runCheck>>["report"];
+  let paths: Awaited<ReturnType<typeof pluginRoot.runCheck>>["paths"];
+  try {
+    const result = await pluginRoot.runCheck({
+      allowExecution: options.allowExecute === true,
+      capture: options.runtime === true,
+      configPath: generatedConfig?.path,
+      mockSdk: options.mockSdk !== false,
+      openclawPath,
+      outDir,
+      pluginRoot: sourcePath,
+    });
+    report = result.report;
+    paths = result.paths;
+  } finally {
+    if (generatedConfig) {
+      await rm(generatedConfig.dir, { recursive: true, force: true });
+    }
+  }
+
+  await ci.writeOutputs(report, {
+    cwd: dirname(paths.jsonPath),
+    outDir: ".",
+  });
+
+  if (options.json) {
+    process.stdout.write(`${JSON.stringify(reports.sanitizeArtifact(report), null, 2)}\n`);
+  } else {
+    console.log(reports.renderTextSummary(report, { artifacts: paths }));
+  }
+
+  if (reportStatus(report) !== "pass") {
+    const breakageCount = reportBreakageCount(report);
+    throw new Error(
+      `Plugin Inspector found ${breakageCount} hard error${breakageCount === 1 ? "" : "s"}`,
+    );
+  }
+}
+
+async function createPluginInspectorConfigIfNeeded(sourcePath: string) {
+  if (
+    (await fileExists(join(sourcePath, "plugin-inspector.config.json"))) ||
+    (await fileExists(join(sourcePath, ".plugin-inspector.json")))
+  ) {
+    return null;
+  }
+
+  const packageJson = await readJsonFile(join(sourcePath, "package.json"));
+  const pluginManifest = await readJsonFile(join(sourcePath, "openclaw.plugin.json"));
+  if (!packageJson && !pluginManifest) {
+    return null;
+  }
+  if (hasPackagePluginInspectorConfig(packageJson)) {
+    return null;
+  }
+
+  const rawName =
+    packageJsonString(packageJson, "name") ??
+    packageJsonString(pluginManifest, "id") ??
+    basename(sourcePath);
+  const configDir = await mkdtemp(join(tmpdir(), "clawhub-plugin-inspector-config-"));
+  const configPath = join(configDir, "plugin-inspector.config.json");
+  await writeFile(
+    configPath,
+    `${JSON.stringify(
+      {
+        version: 1,
+        plugin: {
+          id: pluginInspectorFixtureId(rawName),
+        },
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  return { dir: configDir, path: configPath };
+}
+
+async function fileExists(path: string) {
+  return Boolean(await stat(path).catch(() => null));
+}
+
+function hasPackagePluginInspectorConfig(packageJson: Record<string, unknown> | null) {
+  if (!packageJson) return false;
+  return (
+    isPlainRecord(packageJson.pluginInspector) || isPlainRecord(packageJson["plugin-inspector"])
+  );
+}
+
+function pluginInspectorFixtureId(rawName: string) {
+  return (
+    rawName
+      .split("/")
+      .pop()
+      ?.toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "published-plugin"
+  );
+}
+
 async function createClawPackFromFolder(options: {
   sourcePath: string;
   packDestination: string;
@@ -726,12 +855,21 @@ export async function cmdPublishPackage(
 
       if (options.json) {
         process.stdout.write(
-          `${JSON.stringify({ ...plan.output, releaseId: result.releaseId }, null, 2)}\n`,
+          `${JSON.stringify(
+            {
+              ...plan.output,
+              releaseId: result.releaseId,
+              inspectorFindings: result.inspectorFindings,
+            },
+            null,
+            2,
+          )}\n`,
         );
       } else {
         spinner?.succeed(
           `OK. Published ${plan.payload.name}@${plan.payload.version} (${result.releaseId})`,
         );
+        printPackageInspectorFindings(result);
       }
     } catch (error) {
       spinner?.fail(formatError(error));
@@ -739,6 +877,25 @@ export async function cmdPublishPackage(
     }
   } finally {
     await plan?.cleanup?.();
+  }
+}
+
+function printPackageInspectorFindings(result: ApiV1PackagePublishResponse) {
+  const findings = result.inspectorFindings ?? [];
+  if (findings.length === 0) return;
+  const errorCount = findings.filter((finding) => finding.findingKind === "error").length;
+  const warningCount = findings.length - errorCount;
+  const parts = [
+    warningCount > 0 ? `${warningCount} warning${warningCount === 1 ? "" : "s"}` : null,
+    errorCount > 0 ? `${errorCount} error${errorCount === 1 ? "" : "s"}` : null,
+  ].filter((part): part is string => Boolean(part));
+  console.log(`Plugin Inspector findings: ${parts.join(", ")}`);
+  for (const finding of findings.slice(0, 10)) {
+    const label = finding.issueClass ? `${finding.code} (${finding.issueClass})` : finding.code;
+    console.log(`- ${finding.findingKind.toUpperCase()} ${label}: ${finding.message}`);
+  }
+  if (findings.length > 10) {
+    console.log(`- ...and ${findings.length - 10} more findings`);
   }
 }
 
@@ -1241,6 +1398,20 @@ function normalizePackageNameOrFail(raw: string) {
   const trimmed = raw.trim();
   if (!trimmed) fail("Package name required");
   return trimmed;
+}
+
+function reportStatus(report: unknown): string | null {
+  return isPlainRecord(report) && typeof report.status === "string" ? report.status : null;
+}
+
+function reportBreakageCount(report: unknown): number {
+  if (!isPlainRecord(report) || !isPlainRecord(report.summary)) return 0;
+  const value = report.summary.breakageCount;
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
 function spinnerText(spinner: ReturnType<typeof createSpinner> | null, text: string) {

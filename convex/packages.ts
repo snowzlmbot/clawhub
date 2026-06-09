@@ -34,6 +34,7 @@ import {
   assertAdmin,
   assertModerator,
   getOptionalActiveAuthUserId,
+  requireUserFromAction,
   requireUser,
 } from "./lib/access";
 import {
@@ -44,6 +45,7 @@ import {
   readArtifactReportStatus,
   appendPackageModerationEventLog,
 } from "./lib/artifactModeration";
+import { sha256Hex } from "./lib/clawpack";
 import { requireGitHubAccountAge } from "./lib/githubAccount";
 import { normalizeGitHubRepository } from "./lib/githubActionsOidc";
 import { isOfficialPublisher } from "./lib/officialPublishers";
@@ -260,6 +262,15 @@ const internalRefs = internal as unknown as {
     insertAuditLogInternal: unknown;
     updateReleaseStaticScanInternal: unknown;
     backfillLatestPackageScanStatusInternal: unknown;
+    insertPackageInspectorWarningsInternal: unknown;
+    sendPackageInspectorFindingsEmailInternal: unknown;
+    getPackageInspectorEmailContextInternal: unknown;
+    markPackageInspectorFindingsEmailedInternal: unknown;
+    claimPackageInspectorScanBatchInternal: unknown;
+    ingestPackageInspectorScanResultsInternal: unknown;
+  };
+  packageInspectorNode: {
+    runPackageInspectorForPublishInternal: unknown;
   };
   packagePublishTokens: {
     createInternal: unknown;
@@ -282,6 +293,64 @@ const internalRefs = internal as unknown as {
   };
   vt: {
     scanPackageReleaseWithVirusTotal: unknown;
+  };
+};
+
+const packageInspectorWarningInputValidator = v.object({
+  id: v.optional(v.string()),
+  code: v.string(),
+  severity: v.optional(v.string()),
+  level: v.optional(v.string()),
+  issueClass: v.optional(v.string()),
+  compatStatus: v.optional(v.string()),
+  deprecated: v.optional(v.boolean()),
+  message: v.string(),
+  evidence: v.optional(v.array(v.string())),
+  fixture: v.optional(v.string()),
+  decision: v.optional(v.string()),
+});
+
+const packageInspectorFindingInputValidator = v.object({
+  id: v.optional(v.string()),
+  code: v.string(),
+  severity: v.optional(v.string()),
+  level: v.optional(v.string()),
+  issueClass: v.optional(v.string()),
+  compatStatus: v.optional(v.string()),
+  deprecated: v.optional(v.boolean()),
+  message: v.string(),
+  evidence: v.optional(v.array(v.string())),
+  fixture: v.optional(v.string()),
+  decision: v.optional(v.string()),
+});
+
+type PackageInspectorFinding = {
+  id?: string;
+  code: string;
+  severity?: string;
+  level?: string;
+  issueClass?: string;
+  compatStatus?: string;
+  deprecated?: boolean;
+  message: string;
+  evidence?: string[];
+  fixture?: string;
+  decision?: string;
+};
+
+type PackageInspectorPublishResult = {
+  status: "pass" | "fail";
+  summary: {
+    breakageCount: number;
+    warningCount: number;
+    deprecationWarningCount: number;
+    issueCount: number;
+  };
+  breakages: PackageInspectorFinding[];
+  warnings: PackageInspectorFinding[];
+  metadata?: {
+    inspectorVersion?: string;
+    targetOpenClawVersion?: string;
   };
 };
 const packageAutobanRemediationInternalRefs = internal as unknown as {
@@ -681,6 +750,7 @@ type DashboardPackageListItem = {
   ownerUserId: Id<"users">;
   ownerPublisherId?: Id<"publishers">;
   latestVersion: string | null;
+  inspectorWarningCount: number;
   stats: Doc<"packages">["stats"];
   verification: Doc<"packages">["verification"];
   scanStatus: Doc<"packages">["scanStatus"];
@@ -1116,9 +1186,11 @@ async function toPublicPackageListItemFromPackage(
 async function toDashboardPackageListItem(
   ctx: DbReaderCtx,
   pkg: Doc<"packages">,
+  _viewerUserId: Id<"users">,
 ): Promise<DashboardPackageListItem | null> {
   if (pkg.softDeletedAt) return null;
   const latestRelease = pkg.latestReleaseId ? await ctx.db.get(pkg.latestReleaseId) : null;
+  const inspectorWarningCount = await countPackageInspectorFindings(ctx, pkg._id);
   return {
     _id: pkg._id,
     name: pkg.name,
@@ -1132,6 +1204,7 @@ async function toDashboardPackageListItem(
     ownerUserId: pkg.ownerUserId,
     ownerPublisherId: pkg.ownerPublisherId,
     latestVersion: pkg.latestVersionSummary?.version ?? null,
+    inspectorWarningCount,
     stats: pkg.stats,
     verification: pkg.verification,
     scanStatus: pkg.scanStatus,
@@ -1149,6 +1222,14 @@ async function toDashboardPackageListItem(
           }
         : null,
   };
+}
+
+async function countPackageInspectorFindings(ctx: DbReaderCtx, packageId: Id<"packages">) {
+  const warnings = await ctx.db
+    .query("packageInspectorWarnings")
+    .withIndex("by_package_created", (q) => q.eq("packageId", packageId))
+    .take(101);
+  return warnings.length > 100 ? 100 : warnings.length;
 }
 
 async function listDashboardPackagesForOwnerPublisher(
@@ -1199,7 +1280,9 @@ async function listDashboardPackagesForOwnerPublisher(
   );
   const limited = combined.slice(0, limit);
   return (
-    await Promise.all(limited.map(async (pkg) => await toDashboardPackageListItem(ctx, pkg)))
+    await Promise.all(
+      limited.map(async (pkg) => await toDashboardPackageListItem(ctx, pkg, viewerUserId)),
+    )
   ).filter((pkg): pkg is DashboardPackageListItem => Boolean(pkg));
 }
 
@@ -1246,7 +1329,9 @@ async function listDashboardPackagesForOwnerUser(
   const scoped = await filterPackagesForOwnerUserDashboard(ctx, entries, ownerUserId);
   const filtered = scoped.filter((pkg) => !pkg.softDeletedAt).slice(0, limit);
   return (
-    await Promise.all(filtered.map(async (pkg) => await toDashboardPackageListItem(ctx, pkg)))
+    await Promise.all(
+      filtered.map(async (pkg) => await toDashboardPackageListItem(ctx, pkg, viewerUserId)),
+    )
   ).filter((pkg): pkg is DashboardPackageListItem => Boolean(pkg));
 }
 
@@ -2074,6 +2159,124 @@ export const getManageContext = query({
       package: pkg,
       latestRelease: toPublicPackageRelease(latestRelease),
     };
+  },
+});
+
+function toPublicPackageInspectorFinding(warning: Doc<"packageInspectorWarnings">) {
+  const findingKind =
+    warning.findingKind ??
+    (warning.level === "breakage" || warning.severity === "P0" ? "error" : "warning");
+  return {
+    _id: warning._id,
+    packageName: warning.packageName,
+    version: warning.version,
+    findingKind,
+    code: warning.code,
+    severity: warning.severity,
+    level: warning.level,
+    issueClass: warning.issueClass,
+    compatStatus: warning.compatStatus,
+    deprecated: warning.deprecated,
+    message: warning.message,
+    evidence: warning.evidence ?? [],
+    fixture: warning.fixture,
+    decision: warning.decision,
+    inspectorVersion: warning.inspectorVersion,
+    targetOpenClawVersion: warning.targetOpenClawVersion,
+    scanSource: warning.scanSource ?? "publish",
+    createdAt: warning.createdAt,
+  };
+}
+
+export const listPackageInspectorFindingsPublic = query({
+  args: {
+    name: v.string(),
+    limit: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const viewerUserId = await getOptionalActiveAuthUserId(ctx);
+    if (!viewerUserId) return [];
+    const pkg = await getReadablePackageByName(ctx, args.name, viewerUserId);
+    if (!pkg || pkg.softDeletedAt || pkg.family === "skill") return [];
+    const actor = await ctx.db.get(viewerUserId);
+    if (!actor || actor.deletedAt || actor.deactivatedAt) return [];
+    if (actor.role !== "admin" && actor.role !== "moderator") {
+      const canManage = await viewerCanManagePackageOwner(ctx, pkg, viewerUserId);
+      if (!canManage) return [];
+    }
+
+    const limit = Math.max(1, Math.min(args.limit ?? 50, 100));
+    const warnings = await ctx.db
+      .query("packageInspectorWarnings")
+      .withIndex("by_package_created", (q) => q.eq("packageId", pkg._id))
+      .order("desc")
+      .take(limit);
+
+    return warnings.map(toPublicPackageInspectorFinding);
+  },
+});
+
+export const getPackageInspectorValidationSummaryPublic = query({
+  args: {
+    name: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const viewerUserId = await getOptionalActiveAuthUserId(ctx);
+    const pkg = await getReadablePackageByName(ctx, args.name, viewerUserId ?? undefined);
+    if (!pkg || pkg.softDeletedAt || pkg.family === "skill") {
+      return {
+        findingCount: 0,
+        errorCount: 0,
+        warningCount: 0,
+        incompatibleAfterOpenClawVersion: null,
+      };
+    }
+
+    const findings = await ctx.db
+      .query("packageInspectorWarnings")
+      .withIndex("by_package_created", (q) => q.eq("packageId", pkg._id))
+      .order("desc")
+      .take(100);
+    const errorFindings = findings.filter((finding) => {
+      const kind =
+        finding.findingKind ??
+        (finding.level === "breakage" || finding.severity === "P0" ? "error" : "warning");
+      return kind === "error";
+    });
+    return {
+      findingCount: findings.length,
+      errorCount: errorFindings.length,
+      warningCount: findings.length - errorFindings.length,
+      incompatibleAfterOpenClawVersion:
+        errorFindings.find((finding) => finding.targetOpenClawVersion)?.targetOpenClawVersion ??
+        null,
+    };
+  },
+});
+
+export const listPackageInspectorWarningsForManager = query({
+  args: {
+    name: v.string(),
+    limit: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const viewerUserId = await getOptionalActiveAuthUserId(ctx);
+    if (!viewerUserId) return [];
+    const pkg = await getPackageByNormalizedName(ctx, normalizePackageName(args.name));
+    if (!pkg || pkg.softDeletedAt || pkg.family === "skill") return [];
+    const actor = await ctx.db.get(viewerUserId);
+    if (!actor || actor.deletedAt || actor.deactivatedAt) return [];
+    if (actor.role !== "admin" && actor.role !== "moderator") {
+      const canManage = await viewerCanManagePackageOwner(ctx, pkg, viewerUserId);
+      if (!canManage) return [];
+    }
+    const limit = Math.max(1, Math.min(args.limit ?? 50, 100));
+    const warnings = await ctx.db
+      .query("packageInspectorWarnings")
+      .withIndex("by_package_created", (q) => q.eq("packageId", pkg._id))
+      .order("desc")
+      .take(limit);
+    return warnings.map(toPublicPackageInspectorFinding);
   },
 });
 
@@ -5857,8 +6060,78 @@ function doesTrustedPublisherMatchPublishToken(
   );
 }
 
+async function runPackageInspectorPublishGate(
+  ctx: Pick<ActionCtx, "runAction">,
+  args: {
+    packageName: string;
+    version: string;
+    files: ReturnType<typeof normalizePublishFiles>;
+  },
+): Promise<PackageInspectorPublishResult> {
+  const result = await runActionRef<PackageInspectorPublishResult>(
+    ctx,
+    internalRefs.packageInspectorNode.runPackageInspectorForPublishInternal,
+    {
+      packageName: args.packageName,
+      version: args.version,
+      files: args.files,
+    },
+  );
+  if (result.status === "fail" || result.summary.breakageCount > 0) {
+    throw new ConvexError(formatPackageInspectorBlockedPublishError(result));
+  }
+  return result;
+}
+
+function formatPackageInspectorBlockedPublishError(result: PackageInspectorPublishResult) {
+  const count = Math.max(result.summary.breakageCount, result.breakages.length, 1);
+  const noun = count === 1 ? "breakage" : "breakages";
+  const details = result.breakages
+    .slice(0, 3)
+    .map((finding) => `${finding.code}: ${finding.message}`)
+    .join("; ");
+  return `Plugin Inspector blocked publish: ${count} ${noun}${details ? `. ${details}` : ""}`;
+}
+
+function packageInspectorWarningDedupeKey(
+  warning: Pick<PackageInspectorFinding, "id" | "code" | "message" | "evidence" | "fixture"> & {
+    inspectorVersion?: string;
+    targetOpenClawVersion?: string;
+  },
+) {
+  return JSON.stringify([
+    warning.id ?? "",
+    warning.code,
+    warning.message,
+    warning.fixture ?? "",
+    warning.evidence ?? [],
+    warning.inspectorVersion ?? "",
+    warning.targetOpenClawVersion ?? "",
+  ]);
+}
+
+async function verifyPublishFileStorageMetadata(
+  ctx: Pick<ActionCtx, "storage">,
+  files: ReturnType<typeof normalizePublishFiles>,
+) {
+  return await Promise.all(
+    files.map(async (file) => {
+      const blob = await ctx.storage.get(file.storageId as Id<"_storage">);
+      if (!blob) throw new ConvexError(`Uploaded file no longer exists: ${file.path}`);
+      const bytes = new Uint8Array(await blob.arrayBuffer());
+      return {
+        ...file,
+        size: blob.size,
+        sha256: await sha256Hex(bytes),
+        contentType: file.contentType?.trim() || blob.type || undefined,
+      };
+    }),
+  );
+}
+
 async function publishPackageImpl(
-  ctx: Parameters<typeof requireGitHubAccountAge>[0] & Pick<ActionCtx, "storage" | "scheduler">,
+  ctx: Parameters<typeof requireGitHubAccountAge>[0] &
+    Pick<ActionCtx, "storage" | "scheduler" | "runAction">,
   auth: PackagePublishAuthContext,
   rawPayload: unknown,
 ) {
@@ -5985,7 +6258,7 @@ async function publishPackageImpl(
   }
 
   const displayName = payload.displayName?.trim() || name;
-  const files = normalizePublishFiles(payload.files);
+  const files = await verifyPublishFileStorageMetadata(ctx, normalizePublishFiles(payload.files));
   if (payload.artifact?.kind !== "npm-pack") {
     const oversizedFile = findOversizedPublishFile(files);
     if (oversizedFile) {
@@ -6116,6 +6389,14 @@ async function publishPackageImpl(
     },
     files,
   });
+  const inspectorResult =
+    family === "code-plugin" || family === "bundle-plugin"
+      ? await runPackageInspectorPublishGate(ctx, {
+          packageName: name,
+          version,
+          files,
+        })
+      : null;
   const ownerPublisher = ownerPublisherId
     ? await runQueryRef<Doc<"publishers"> | null>(ctx, internalRefs.publishers.getByIdInternal, {
         publisherId: ownerPublisherId,
@@ -6183,6 +6464,39 @@ async function publishPackageImpl(
     source: effectiveSource,
   });
 
+  const inspectorFindings =
+    inspectorResult?.warnings.map((finding) =>
+      toPackageInspectorPublishResponseFinding(finding, inspectorResult.metadata),
+    ) ?? [];
+  if (inspectorResult?.warnings.length) {
+    const insertFindingsResult = await runMutationRef<{
+      ok: true;
+      inserted: number;
+      shouldEmailOwner: boolean;
+    }>(ctx, internalRefs.packages.insertPackageInspectorWarningsInternal, {
+      packageId: publishResult.packageId,
+      releaseId: publishResult.releaseId,
+      ownerUserId,
+      ownerPublisherId,
+      packageName: name,
+      version,
+      scanSource: "publish",
+      inspectorVersion: inspectorResult.metadata?.inspectorVersion,
+      targetOpenClawVersion: inspectorResult.metadata?.targetOpenClawVersion,
+      findings: inspectorResult.warnings,
+    });
+    if (insertFindingsResult.shouldEmailOwner) {
+      try {
+        await runActionRef(ctx, internalRefs.packages.sendPackageInspectorFindingsEmailInternal, {
+          packageId: publishResult.packageId,
+          releaseId: publishResult.releaseId,
+        });
+      } catch (error) {
+        console.error("Package Inspector findings email failed", error);
+      }
+    }
+  }
+
   if (auth.kind === "github-actions") {
     await runMutationRef(ctx, internalRefs.packagePublishTokens.revokeInternal, {
       tokenId: auth.publishToken._id,
@@ -6237,7 +6551,27 @@ async function publishPackageImpl(
     source: "publish",
   });
 
-  return publishResult;
+  return inspectorFindings.length > 0 ? { ...publishResult, inspectorFindings } : publishResult;
+}
+
+function toPackageInspectorPublishResponseFinding(
+  finding: PackageInspectorFinding,
+  metadata: PackageInspectorPublishResult["metadata"],
+) {
+  const findingKind =
+    finding.level === "breakage" || finding.level === "error" || finding.severity === "P0"
+      ? ("error" as const)
+      : ("warning" as const);
+  return {
+    findingKind,
+    code: finding.code,
+    severity: finding.severity,
+    level: finding.level,
+    issueClass: finding.issueClass,
+    message: finding.message,
+    inspectorVersion: metadata?.inspectorVersion,
+    targetOpenClawVersion: metadata?.targetOpenClawVersion,
+  };
 }
 
 export const publishPackageForUserInternal = internalAction({
@@ -6251,6 +6585,16 @@ export const publishPackageForUserInternal = internalAction({
       { kind: "user", actorUserId: args.actorUserId },
       args.payload,
     );
+  },
+});
+
+export const publishRelease: ReturnType<typeof action> = action({
+  args: {
+    payload: v.any(),
+  },
+  handler: async (ctx, args) => {
+    const { userId } = await requireUserFromAction(ctx);
+    return await publishPackageImpl(ctx, { kind: "user", actorUserId: userId }, args.payload);
   },
 });
 
@@ -6704,6 +7048,555 @@ export const repairPackageIdentityInternal = internalMutation({
     };
   },
 });
+
+export const insertPackageInspectorWarningsInternal = internalMutation({
+  args: {
+    packageId: v.id("packages"),
+    releaseId: v.id("packageReleases"),
+    ownerUserId: v.id("users"),
+    ownerPublisherId: v.optional(v.id("publishers")),
+    packageName: v.string(),
+    version: v.string(),
+    scanSource: v.optional(v.union(v.literal("publish"), v.literal("nightly"))),
+    inspectorVersion: v.optional(v.string()),
+    targetOpenClawVersion: v.optional(v.string()),
+    findings: v.optional(v.array(packageInspectorFindingInputValidator)),
+    warnings: v.optional(v.array(packageInspectorWarningInputValidator)),
+  },
+  handler: async (ctx, args) => {
+    return await insertPackageInspectorFindings(ctx, args);
+  },
+});
+
+async function insertPackageInspectorFindings(
+  ctx: Pick<MutationCtx, "db">,
+  args: {
+    packageId: Id<"packages">;
+    releaseId: Id<"packageReleases">;
+    ownerUserId: Id<"users">;
+    ownerPublisherId?: Id<"publishers">;
+    packageName: string;
+    version: string;
+    scanSource?: "publish" | "nightly";
+    inspectorVersion?: string;
+    targetOpenClawVersion?: string;
+    findings?: PackageInspectorFinding[];
+    warnings?: PackageInspectorFinding[];
+  },
+) {
+  const findings = args.findings ?? args.warnings ?? [];
+  if (findings.length === 0) return { ok: true as const, inserted: 0, shouldEmailOwner: false };
+  const existingWarnings = await ctx.db
+    .query("packageInspectorWarnings")
+    .withIndex("by_release", (q) => q.eq("releaseId", args.releaseId))
+    .collect();
+  const existingWarningKeys = new Set(
+    existingWarnings.map((warning) =>
+      packageInspectorWarningDedupeKey({
+        id: warning.inspectorFindingId,
+        code: warning.code,
+        message: warning.message,
+        evidence: warning.evidence,
+        fixture: warning.fixture,
+        inspectorVersion: warning.inspectorVersion,
+        targetOpenClawVersion: warning.targetOpenClawVersion,
+      }),
+    ),
+  );
+  const existingNotification = await ctx.db
+    .query("packageInspectorFindingNotifications")
+    .withIndex("by_release", (q) => q.eq("releaseId", args.releaseId))
+    .unique();
+  const now = Date.now();
+  let inserted = 0;
+  for (const warning of findings.slice(0, 100)) {
+    const warningKey = packageInspectorWarningDedupeKey({
+      ...warning,
+      inspectorVersion: args.inspectorVersion,
+      targetOpenClawVersion: args.targetOpenClawVersion,
+    });
+    if (existingWarningKeys.has(warningKey)) continue;
+    const findingKind =
+      warning.level === "breakage" || warning.level === "error" || warning.severity === "P0"
+        ? "error"
+        : "warning";
+    await ctx.db.insert("packageInspectorWarnings", {
+      packageId: args.packageId,
+      releaseId: args.releaseId,
+      ownerUserId: args.ownerUserId,
+      ownerPublisherId: args.ownerPublisherId,
+      packageName: args.packageName,
+      version: args.version,
+      findingKind,
+      scanSource: args.scanSource ?? "publish",
+      inspectorVersion: args.inspectorVersion,
+      targetOpenClawVersion: args.targetOpenClawVersion,
+      code: warning.code,
+      severity: warning.severity,
+      level: warning.level,
+      issueClass: warning.issueClass,
+      compatStatus: warning.compatStatus,
+      deprecated: warning.deprecated,
+      message: warning.message,
+      evidence: warning.evidence,
+      fixture: warning.fixture,
+      decision: warning.decision,
+      inspectorFindingId: warning.id,
+      createdAt: now,
+    });
+    existingWarningKeys.add(warningKey);
+    inserted += 1;
+  }
+  return {
+    ok: true as const,
+    inserted,
+    shouldEmailOwner: !existingNotification && (inserted > 0 || existingWarnings.length > 0),
+  };
+}
+
+export const markPackageInspectorFindingsEmailedInternal = internalMutation({
+  args: {
+    packageId: v.id("packages"),
+    releaseId: v.id("packageReleases"),
+    ownerUserId: v.id("users"),
+    ownerPublisherId: v.optional(v.id("publishers")),
+    packageName: v.string(),
+    version: v.string(),
+    findingCount: v.number(),
+    email: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const existing = await ctx.db
+      .query("packageInspectorFindingNotifications")
+      .withIndex("by_release", (q) => q.eq("releaseId", args.releaseId))
+      .unique();
+    if (existing) return { ok: true as const, created: false };
+    await ctx.db.insert("packageInspectorFindingNotifications", {
+      packageId: args.packageId,
+      releaseId: args.releaseId,
+      ownerUserId: args.ownerUserId,
+      ownerPublisherId: args.ownerPublisherId,
+      packageName: args.packageName,
+      version: args.version,
+      email: args.email,
+      findingCount: Math.max(0, Math.round(args.findingCount)),
+      sentAt: Date.now(),
+    });
+    return { ok: true as const, created: true };
+  },
+});
+
+export const getPackageInspectorEmailContextInternal = internalQuery({
+  args: {
+    packageId: v.id("packages"),
+    releaseId: v.id("packageReleases"),
+  },
+  handler: async (ctx, args) => {
+    const [pkg, release] = await Promise.all([
+      ctx.db.get(args.packageId),
+      ctx.db.get(args.releaseId),
+    ]);
+    if (!pkg || pkg.softDeletedAt || !release || release.softDeletedAt) return null;
+    const owner = await ctx.db.get(pkg.ownerUserId);
+    if (!owner || owner.deletedAt || owner.deactivatedAt || !owner.email) return null;
+    const findings = await ctx.db
+      .query("packageInspectorWarnings")
+      .withIndex("by_release_created", (q) => q.eq("releaseId", release._id))
+      .order("desc")
+      .take(100);
+    if (findings.length === 0) return null;
+    const notification = await ctx.db
+      .query("packageInspectorFindingNotifications")
+      .withIndex("by_release", (q) => q.eq("releaseId", release._id))
+      .unique();
+    if (notification) return null;
+    return {
+      packageId: pkg._id,
+      releaseId: release._id,
+      ownerUserId: pkg.ownerUserId,
+      ownerPublisherId: pkg.ownerPublisherId,
+      ownerEmail: owner.email,
+      packageName: pkg.name,
+      version: release.version,
+      findings: findings.map(toPublicPackageInspectorFinding),
+    };
+  },
+});
+
+export const sendPackageInspectorFindingsEmailInternal = internalAction({
+  args: {
+    packageId: v.id("packages"),
+    releaseId: v.id("packageReleases"),
+  },
+  handler: async (ctx, args) => {
+    const context = await runQueryRef<{
+      packageId: Id<"packages">;
+      releaseId: Id<"packageReleases">;
+      ownerUserId: Id<"users">;
+      ownerPublisherId?: Id<"publishers">;
+      ownerEmail: string;
+      packageName: string;
+      version: string;
+      findings: Array<{
+        findingKind: "warning" | "error";
+        code: string;
+        issueClass?: string;
+        level?: string;
+        severity?: string;
+        message: string;
+        inspectorVersion?: string;
+        targetOpenClawVersion?: string;
+      }>;
+    } | null>(ctx, internalRefs.packages.getPackageInspectorEmailContextInternal, args);
+    if (!context) return { ok: true as const, sent: false, reason: "no-context" as const };
+
+    const email = renderPackageInspectorFindingsEmail({
+      packageName: context.packageName,
+      version: context.version,
+      findings: context.findings,
+      warningUrl: `${getPublicSiteOrigin()}${buildPublicPluginValidationPath(context.packageName)}`,
+    });
+    const sent = await sendResendEmail({
+      to: context.ownerEmail,
+      subject: email.subject,
+      text: email.text,
+      html: email.html,
+    });
+    if (sent) {
+      await runMutationRef(ctx, internalRefs.packages.markPackageInspectorFindingsEmailedInternal, {
+        packageId: context.packageId,
+        releaseId: context.releaseId,
+        ownerUserId: context.ownerUserId,
+        ownerPublisherId: context.ownerPublisherId,
+        packageName: context.packageName,
+        version: context.version,
+        findingCount: context.findings.length,
+        email: context.ownerEmail,
+      });
+    }
+    return { ok: true as const, sent };
+  },
+});
+
+type PackageInspectorScanBatchItem = {
+  packageId: Id<"packages">;
+  releaseId: Id<"packageReleases">;
+  ownerUserId: Id<"users">;
+  ownerPublisherId?: Id<"publishers">;
+  packageName: string;
+  version: string;
+  artifactKind: "legacy-zip" | "npm-pack";
+};
+
+async function listPackageInspectorScanBatch(
+  ctx: Pick<QueryCtx | MutationCtx, "db">,
+  args: { cursor?: string | null; batchSize?: number },
+) {
+  const batchSize = Math.max(1, Math.min(Math.round(args.batchSize ?? 25), 50));
+  const page = await ctx.db
+    .query("packageReleases")
+    .withIndex("by_active_created", (q) => q.eq("softDeletedAt", undefined))
+    .order("asc")
+    .paginate({
+      cursor: args.cursor ?? null,
+      numItems: batchSize,
+    });
+  const items: PackageInspectorScanBatchItem[] = [];
+  for (const release of page.page) {
+    if (items.length >= batchSize) break;
+    const pkg = await ctx.db.get(release.packageId);
+    if (
+      !pkg ||
+      pkg.softDeletedAt ||
+      (pkg.family !== "code-plugin" && pkg.family !== "bundle-plugin") ||
+      pkg.channel === "private" ||
+      isPackageBlockedFromPublic(resolvePublicPackageScanStatus(pkg, release))
+    ) {
+      continue;
+    }
+    const latestReleaseId = pkg.latestReleaseId ?? pkg.tags?.latest;
+    if (latestReleaseId !== release._id) continue;
+    items.push({
+      packageId: pkg._id,
+      releaseId: release._id,
+      ownerUserId: pkg.ownerUserId,
+      ownerPublisherId: pkg.ownerPublisherId,
+      packageName: pkg.name,
+      version: release.version,
+      artifactKind: release.artifactKind ?? "legacy-zip",
+    });
+  }
+  return { items, nextCursor: page.isDone ? null : page.continueCursor };
+}
+
+export const previewPackageInspectorScanBatchInternal = internalQuery({
+  args: {
+    batchSize: v.optional(v.number()),
+    cursor: v.optional(v.union(v.string(), v.null())),
+  },
+  handler: async (ctx, args) => {
+    const result = await listPackageInspectorScanBatch(ctx, args);
+    return { ok: true as const, leased: false as const, ...result };
+  },
+});
+
+export const claimPackageInspectorScanBatchInternal = internalMutation({
+  args: {
+    batchSize: v.optional(v.number()),
+    leaseMs: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const now = Date.now();
+    const leaseMs = Math.max(
+      60_000,
+      Math.min(Math.round(args.leaseMs ?? 30 * 60_000), 2 * 60 * 60_000),
+    );
+    const cursorName = "nightly";
+    const cursorDoc = await ctx.db
+      .query("packageInspectorScanCursors")
+      .withIndex("by_name", (q) => q.eq("name", cursorName))
+      .unique();
+    if (cursorDoc?.leaseExpiresAt && cursorDoc.leaseExpiresAt > now) {
+      return {
+        ok: true as const,
+        leased: true as const,
+        items: [],
+        nextCursor: cursorDoc.cursor ?? null,
+      };
+    }
+
+    const { items, nextCursor } = await listPackageInspectorScanBatch(ctx, {
+      cursor: cursorDoc?.cursor ?? null,
+      batchSize: args.batchSize,
+    });
+    if (cursorDoc) {
+      await ctx.db.patch(cursorDoc._id, {
+        cursor: nextCursor,
+        leaseExpiresAt: now + leaseMs,
+        updatedAt: now,
+      });
+    } else {
+      await ctx.db.insert("packageInspectorScanCursors", {
+        name: cursorName,
+        cursor: nextCursor,
+        leaseExpiresAt: now + leaseMs,
+        updatedAt: now,
+      });
+    }
+    return { ok: true as const, leased: false as const, items, nextCursor };
+  },
+});
+
+export const getPackageInspectorArtifactInternal = internalQuery({
+  args: {
+    releaseId: v.id("packageReleases"),
+  },
+  handler: async (ctx, args) => {
+    const release = await ctx.db.get(args.releaseId);
+    if (!release || release.softDeletedAt) return null;
+    const pkg = await ctx.db.get(release.packageId);
+    if (
+      !pkg ||
+      pkg.softDeletedAt ||
+      (pkg.family !== "code-plugin" && pkg.family !== "bundle-plugin") ||
+      pkg.channel === "private" ||
+      isPackageBlockedFromPublic(resolvePublicPackageScanStatus(pkg, release))
+    ) {
+      return null;
+    }
+    return {
+      packageName: pkg.name,
+      version: release.version,
+      artifactKind: release.artifactKind ?? ("legacy-zip" as const),
+      clawpackStorageId: release.clawpackStorageId,
+      clawpackSha256: release.clawpackSha256,
+      npmIntegrity: release.npmIntegrity,
+      npmShasum: release.npmShasum,
+      npmTarballName: release.npmTarballName,
+      files: release.files.map((file) => ({
+        path: file.path,
+        storageId: file.storageId,
+      })),
+    };
+  },
+});
+
+export const ingestPackageInspectorScanResultsInternal = internalMutation({
+  args: {
+    packageId: v.id("packages"),
+    releaseId: v.id("packageReleases"),
+    inspectorVersion: v.optional(v.string()),
+    targetOpenClawVersion: v.optional(v.string()),
+    findings: v.array(packageInspectorFindingInputValidator),
+  },
+  handler: async (ctx, args) => {
+    const [pkg, release] = await Promise.all([
+      ctx.db.get(args.packageId),
+      ctx.db.get(args.releaseId),
+    ]);
+    if (
+      !pkg ||
+      pkg.softDeletedAt ||
+      !release ||
+      release.softDeletedAt ||
+      release.packageId !== pkg._id
+    ) {
+      throw new ConvexError("Package release not found");
+    }
+    return await insertPackageInspectorFindings(ctx, {
+      packageId: pkg._id,
+      releaseId: release._id,
+      ownerUserId: pkg.ownerUserId,
+      ownerPublisherId: pkg.ownerPublisherId,
+      packageName: pkg.name,
+      version: release.version,
+      scanSource: "nightly",
+      inspectorVersion: args.inspectorVersion,
+      targetOpenClawVersion: args.targetOpenClawVersion,
+      findings: args.findings,
+    });
+  },
+});
+
+function getPublicSiteOrigin() {
+  return (
+    process.env.CLAWHUB_PUBLIC_SITE_URL?.trim() ||
+    process.env.VITE_CONVEX_SITE_URL?.trim() ||
+    "https://clawhub.ai"
+  ).replace(/\/+$/, "");
+}
+
+function buildPublicPluginValidationPath(packageName: string) {
+  const encodedName = packageName
+    .split("/")
+    .map((segment) =>
+      segment.startsWith("@")
+        ? `@${encodeURIComponent(segment.slice(1))}`
+        : encodeURIComponent(segment),
+    )
+    .join("/");
+  return `/plugins/${encodedName}#validation`;
+}
+
+function renderPackageInspectorFindingsEmail(args: {
+  packageName: string;
+  version: string;
+  warningUrl: string;
+  findings: Array<{
+    findingKind: "warning" | "error";
+    code: string;
+    issueClass?: string;
+    level?: string;
+    severity?: string;
+    message: string;
+    inspectorVersion?: string;
+    targetOpenClawVersion?: string;
+  }>;
+}) {
+  const hasErrors = args.findings.some((finding) => finding.findingKind === "error");
+  const inspectorVersion = args.findings.find(
+    (finding) => finding.inspectorVersion,
+  )?.inspectorVersion;
+  const targetOpenClawVersion = args.findings.find(
+    (finding) => finding.targetOpenClawVersion,
+  )?.targetOpenClawVersion;
+  const subject = `Plugin Inspector findings for ${args.packageName}@${args.version}`;
+  const intro = hasErrors
+    ? "Plugin Inspector found compatibility errors or warnings for an already published plugin."
+    : "Your plugin was published, but Plugin Inspector found non-blocking warnings.";
+  const findingLines = args.findings.map((finding) => {
+    const label = finding.issueClass ? `${finding.code} (${finding.issueClass})` : finding.code;
+    return `- ${finding.findingKind.toUpperCase()} ${label}: ${finding.message}`;
+  });
+  const text = [
+    intro,
+    "",
+    `Plugin: ${args.packageName}@${args.version}`,
+    inspectorVersion ? `Plugin Inspector: ${inspectorVersion}` : null,
+    targetOpenClawVersion ? `Target OpenClaw: ${targetOpenClawVersion}` : null,
+    "",
+    "Review the findings:",
+    args.warningUrl,
+    "",
+    ...findingLines,
+  ]
+    .filter((line): line is string => line !== null)
+    .join("\n");
+  const html = `<!doctype html>
+<html>
+  <body style="margin:0;background:#f6f7f9;color:#1f2933;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+    <main style="max-width:640px;margin:0 auto;padding:32px 18px;">
+      <section style="background:#ffffff;border:1px solid #d8dee6;border-radius:8px;padding:24px;">
+        <p style="margin:0 0 8px;color:#5b6472;font-size:13px;">ClawHub Plugin Inspector</p>
+        <h1 style="margin:0 0 14px;font-size:24px;line-height:1.25;">Plugin Inspector findings</h1>
+        <p style="margin:0 0 18px;line-height:1.55;">${escapeHtml(intro)}</p>
+        <div style="margin:0 0 18px;padding:12px;border:1px solid #e2e8f0;border-radius:6px;background:#f8fafc;">
+          <p style="margin:0 0 6px;"><strong>Plugin:</strong> ${escapeHtml(args.packageName)}@${escapeHtml(args.version)}</p>
+          ${inspectorVersion ? `<p style="margin:0 0 6px;"><strong>Plugin Inspector:</strong> ${escapeHtml(inspectorVersion)}</p>` : ""}
+          ${targetOpenClawVersion ? `<p style="margin:0;"><strong>Target OpenClaw:</strong> ${escapeHtml(targetOpenClawVersion)}</p>` : ""}
+        </div>
+        <ul style="margin:0 0 20px;padding:0;list-style:none;">
+          ${args.findings.map(renderEmailFindingHtml).join("")}
+        </ul>
+        <p style="margin:0;"><a href="${escapeHtml(args.warningUrl)}" style="display:inline-block;border-radius:6px;background:#111827;color:#ffffff;text-decoration:none;padding:10px 14px;font-weight:700;">View plugin validation</a></p>
+      </section>
+    </main>
+  </body>
+</html>`;
+  return { subject, text, html };
+}
+
+function renderEmailFindingHtml(finding: {
+  findingKind: "warning" | "error";
+  code: string;
+  issueClass?: string;
+  severity?: string;
+  message: string;
+}) {
+  const color = finding.findingKind === "error" ? "#b42318" : "#a15c07";
+  return `<li style="margin:0 0 10px;padding:12px;border:1px solid #e2e8f0;border-radius:6px;">
+    <p style="margin:0 0 6px;"><span style="display:inline-block;margin-right:8px;color:${color};font-weight:700;text-transform:uppercase;">${escapeHtml(finding.findingKind)}</span><code>${escapeHtml(finding.code)}</code>${finding.issueClass ? ` <span style="color:#5b6472;">${escapeHtml(finding.issueClass)}</span>` : ""}${finding.severity ? ` <span style="color:#5b6472;">${escapeHtml(finding.severity)}</span>` : ""}</p>
+    <p style="margin:0;line-height:1.5;">${escapeHtml(finding.message)}</p>
+  </li>`;
+}
+
+async function sendResendEmail(args: { to: string; subject: string; text: string; html: string }) {
+  const apiKey = process.env.RESEND_API_KEY?.trim();
+  const from = process.env.RESEND_FROM_EMAIL?.trim() || process.env.CLAWHUB_EMAIL_FROM?.trim();
+  if (!apiKey || !from) return false;
+  try {
+    const response = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        from,
+        to: args.to,
+        subject: args.subject,
+        text: args.text,
+        html: args.html,
+      }),
+    });
+    if (!response.ok) {
+      console.error(`Resend email failed: ${response.status} ${await response.text()}`);
+      return false;
+    }
+    return true;
+  } catch (error) {
+    console.error("Resend email failed", error);
+    return false;
+  }
+}
+
+function escapeHtml(value: string) {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
+}
 
 export const insertReleaseInternal = internalMutation({
   args: {

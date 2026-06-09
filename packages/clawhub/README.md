@@ -56,6 +56,7 @@ clawhub package explore --family code-plugin
 clawhub package inspect @openclaw/example-plugin
 clawhub package download @openclaw/example-plugin --tag latest
 clawhub package verify ./example-plugin-1.0.0.tgz --package @openclaw/example-plugin --version 1.0.0
+clawhub package validate ./example-plugin
 clawhub package publish openclaw/example-plugin
 clawhub package publish openclaw/example-plugin@v1.0.0
 clawhub package publish https://github.com/openclaw/example-plugin --dry-run

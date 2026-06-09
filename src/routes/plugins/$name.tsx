@@ -1,7 +1,7 @@
-import { createFileRoute, Link, Outlet, redirect, useRouterState } from "@tanstack/react-router";
+import { createFileRoute, Outlet, redirect, useRouterState } from "@tanstack/react-router";
 import { useQuery } from "convex/react";
-import { AlertTriangle, Download, Upload } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { AlertTriangle, Download, Info, Upload } from "lucide-react";
+import { useEffect, useState, type ReactNode } from "react";
 import { api } from "../../../convex/_generated/api";
 import { DetailHero, DetailPageShell } from "../../components/DetailPageShell";
 import {
@@ -15,6 +15,7 @@ import { MarkdownPreview } from "../../components/MarkdownPreview";
 import { OfficialTag } from "../../components/OfficialBadge";
 import { SidebarMetadata } from "../../components/SidebarMetadata";
 import { SkillDetailSkeleton } from "../../components/skeletons/SkillDetailSkeleton";
+import { Alert, AlertDescription } from "../../components/ui/alert";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../../components/ui/card";
@@ -46,7 +47,30 @@ type PluginDetailRateLimitState = {
   retryAfterSeconds: number | null;
 } | null;
 
-type PluginDetailTab = "readme" | "capabilities" | "compatibility" | "verification";
+type PluginDetailTab = "readme" | "compatibility" | "validation";
+
+type PluginInspectorFinding = {
+  packageName: string;
+  version: string;
+  findingKind?: "warning" | "error";
+  code: string;
+  severity?: string;
+  level?: string;
+  issueClass?: string;
+  message: string;
+  evidence?: string[];
+  inspectorVersion?: string;
+  targetOpenClawVersion?: string;
+  scanSource?: "publish" | "nightly";
+  createdAt: number;
+};
+
+type PluginInspectorValidationSummary = {
+  findingCount: number;
+  errorCount: number;
+  warningCount: number;
+  incompatibleAfterOpenClawVersion: string | null;
+};
 
 export type PluginDetailLoaderData = {
   detail: PackageDetailResponse;
@@ -174,38 +198,12 @@ export const Route = createFileRoute("/plugins/$name")({
   component: PluginDetailRoute,
 });
 
-const CAPABILITY_LABELS: Record<string, string> = {
-  executesCode: "Executes code",
-  runtimeId: "Runtime ID",
-  pluginKind: "Plugin kind",
-  channels: "Channels",
-  providers: "Providers",
-  hooks: "Hooks",
-  bundledSkills: "Bundled skills",
-  setupEntry: "Setup entry",
-  toolNames: "Tools",
-  commandNames: "Commands",
-  serviceNames: "Services",
-  capabilityTags: "Tags",
-  httpRouteCount: "HTTP routes",
-  bundleFormat: "Bundle format",
-  hostTargets: "Host targets",
-};
-
 function formatCapabilityValue(value: unknown): string {
   if (typeof value === "boolean") return value ? "Yes" : "No";
   if (typeof value === "number") return String(value);
   if (typeof value === "string") return value;
   if (Array.isArray(value)) return value.length === 0 ? "None" : value.join(", ");
   return JSON.stringify(value);
-}
-
-function formatDisplayValue(value: string): string {
-  return value
-    .split(/[-_\s]+/)
-    .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(" ");
 }
 
 function formatArtifactSize(value: number | null | undefined): string | null {
@@ -221,25 +219,27 @@ function formatArtifactSize(value: number | null | undefined): string | null {
   return `${size >= 10 ? size.toFixed(0) : size.toFixed(1)} ${units[unitIndex]}`;
 }
 
-function isEmptyObject(obj: unknown): boolean {
-  if (!obj || typeof obj !== "object") return true;
-  return Object.keys(obj).length === 0;
+function pluginDetailTabFromHash(hashValue: string): PluginDetailTab {
+  const hash = hashValue.replace("#", "");
+  if (hash === "warnings") return "validation";
+  if (hash === "capabilities" || hash === "verification") return "compatibility";
+  return hash === "compatibility" || hash === "validation" ? hash : "readme";
 }
 
 function PluginDetailTabs({
   activeTab,
   setActiveTab,
   readmePanel,
-  capabilitiesPanel,
   compatibilityPanel,
-  verificationPanel,
+  validationPanel,
+  validationCount,
 }: {
   activeTab: PluginDetailTab;
   setActiveTab: (tab: PluginDetailTab) => void;
   readmePanel: ReactNode;
-  capabilitiesPanel: ReactNode | null;
   compatibilityPanel: ReactNode | null;
-  verificationPanel: ReactNode | null;
+  validationPanel: ReactNode | null;
+  validationCount: number;
 }) {
   const selectTab = (tab: PluginDetailTab) => {
     setActiveTab(tab);
@@ -253,21 +253,17 @@ function PluginDetailTabs({
   };
 
   const effectiveActiveTab =
-    activeTab === "capabilities" && capabilitiesPanel
-      ? "capabilities"
-      : activeTab === "compatibility" && compatibilityPanel
-        ? "compatibility"
-        : activeTab === "verification" && verificationPanel
-          ? "verification"
-          : "readme";
+    activeTab === "compatibility" && compatibilityPanel
+      ? "compatibility"
+      : activeTab === "validation" && validationPanel
+        ? "validation"
+        : "readme";
   const activePanel =
-    effectiveActiveTab === "capabilities" && capabilitiesPanel
-      ? capabilitiesPanel
-      : effectiveActiveTab === "compatibility" && compatibilityPanel
-        ? compatibilityPanel
-        : effectiveActiveTab === "verification" && verificationPanel
-          ? verificationPanel
-          : readmePanel;
+    effectiveActiveTab === "compatibility" && compatibilityPanel
+      ? compatibilityPanel
+      : effectiveActiveTab === "validation" && validationPanel
+        ? validationPanel
+        : readmePanel;
 
   return (
     <div className="tab-card">
@@ -281,17 +277,6 @@ function PluginDetailTabs({
         >
           README
         </button>
-        {capabilitiesPanel ? (
-          <button
-            className={`tab-button${effectiveActiveTab === "capabilities" ? " is-active" : ""}`}
-            type="button"
-            role="tab"
-            aria-selected={effectiveActiveTab === "capabilities"}
-            onClick={() => selectTab("capabilities")}
-          >
-            Capabilities
-          </button>
-        ) : null}
         {compatibilityPanel ? (
           <button
             className={`tab-button${effectiveActiveTab === "compatibility" ? " is-active" : ""}`}
@@ -303,15 +288,15 @@ function PluginDetailTabs({
             Compatibility
           </button>
         ) : null}
-        {verificationPanel ? (
+        {validationPanel ? (
           <button
-            className={`tab-button${effectiveActiveTab === "verification" ? " is-active" : ""}`}
+            className={`tab-button${effectiveActiveTab === "validation" ? " is-active" : ""}`}
             type="button"
             role="tab"
-            aria-selected={effectiveActiveTab === "verification"}
-            onClick={() => selectTab("verification")}
+            aria-selected={effectiveActiveTab === "validation"}
+            onClick={() => selectTab("validation")}
           >
-            Verification
+            Validation ({validationCount})
           </button>
         ) : null}
       </div>
@@ -359,13 +344,24 @@ export function PluginDetailPage({
       ? { name: manageLookupName, candidateNames: manageCandidateNames }
       : "skip",
   );
+  const validationSummary = useQuery(
+    api.packages.getPackageInspectorValidationSummaryPublic,
+    detail.package ? { name: detail.package.name } : "skip",
+  ) as PluginInspectorValidationSummary | undefined;
+  const inspectorFindings = useQuery(
+    api.packages.listPackageInspectorWarningsForManager,
+    manageContext ? { name: manageContext.package.name, limit: 100 } : "skip",
+  ) as PluginInspectorFinding[] | undefined;
   const [activeTab, setActiveTab] = useState<PluginDetailTab>(() => {
     if (typeof window === "undefined") return "readme";
-    const hash = window.location.hash.replace("#", "");
-    return hash === "capabilities" || hash === "compatibility" || hash === "verification"
-      ? hash
-      : "readme";
+    return pluginDetailTabFromHash(window.location.hash);
   });
+  useEffect(() => {
+    const syncTabFromHash = () => setActiveTab(pluginDetailTabFromHash(window.location.hash));
+    window.addEventListener("hashchange", syncTabFromHash);
+    syncTabFromHash();
+    return () => window.removeEventListener("hashchange", syncTabFromHash);
+  }, []);
   if (isNestedPluginRoute) {
     return <Outlet />;
   }
@@ -435,18 +431,10 @@ export function PluginDetailPage({
         displayName: pkg.displayName,
       }).toString()}`
     : null;
-  const capEntries = capabilities
-    ? Object.entries(capabilities).filter(
-        ([, v]) =>
-          v !== undefined && v !== null && v !== false && !(Array.isArray(v) && v.length === 0),
-      )
-    : [];
   const executesCodeValue =
     typeof capabilities?.executesCode === "boolean"
       ? formatCapabilityValue(capabilities.executesCode)
       : null;
-  const tabCapEntries = capEntries.filter(([key]) => key !== "executesCode");
-
   const compatEntries = compatibility
     ? Object.entries(compatibility).filter(([, v]) => v !== undefined && v !== null)
     : [];
@@ -458,39 +446,6 @@ export function PluginDetailPage({
       <p className="empty-state-body">This plugin doesn't have a README yet.</p>
     </div>
   );
-  const capabilitiesPanel =
-    tabCapEntries.length > 0 ? (
-      <div className="plugin-tab-panel">
-        <dl className="plugin-kv-grid">
-          {tabCapEntries.map(([key, value]) => (
-            <div key={key} className="plugin-kv-row">
-              <dt className="plugin-kv-label">{CAPABILITY_LABELS[key] ?? key}</dt>
-              <dd className="plugin-kv-value">
-                {key === "capabilityTags" && Array.isArray(value) ? (
-                  <div className="plugin-tag-list">
-                    {(value as string[]).map((tag) => (
-                      <Link key={tag} to="/plugins" search={{ q: tag }}>
-                        <Badge variant="compact">{tag}</Badge>
-                      </Link>
-                    ))}
-                  </div>
-                ) : key === "hostTargets" && Array.isArray(value) ? (
-                  <div className="plugin-tag-list">
-                    {(value as string[]).map((target) => (
-                      <Badge key={target} variant="compact">
-                        {target}
-                      </Badge>
-                    ))}
-                  </div>
-                ) : (
-                  formatCapabilityValue(value)
-                )}
-              </dd>
-            </div>
-          ))}
-        </dl>
-      </div>
-    ) : null;
   const compatibilityPanel =
     compatEntries.length > 0 || artifact ? (
       <div className="plugin-tab-panel">
@@ -549,29 +504,78 @@ export function PluginDetailPage({
         </dl>
       </div>
     ) : null;
-  const verificationPanel =
-    verification && !isEmptyObject(verification) ? (
-      <div className="plugin-tab-panel">
-        <dl className="plugin-kv-grid">
-          {verification.tier ? (
-            <div className="plugin-kv-row">
-              <dt className="plugin-kv-label">Tier</dt>
-              <dd className="plugin-kv-value">{formatDisplayValue(verification.tier)}</dd>
-            </div>
-          ) : null}
-          {verification.scope ? (
-            <div className="plugin-kv-row">
-              <dt className="plugin-kv-label">Scope</dt>
-              <dd className="plugin-kv-value">{formatDisplayValue(verification.scope)}</dd>
-            </div>
-          ) : null}
-          {verification.summary ? (
-            <div className="plugin-kv-row">
-              <dt className="plugin-kv-label">Summary</dt>
-              <dd className="plugin-kv-value">{verification.summary}</dd>
-            </div>
-          ) : null}
-        </dl>
+  const validationCount = inspectorFindings?.length ?? validationSummary?.findingCount ?? 0;
+  const incompatibilityAlert =
+    validationSummary &&
+    validationSummary.errorCount > 0 &&
+    validationSummary.incompatibleAfterOpenClawVersion ? (
+      <Alert variant="destructive" className="plugin-validation-alert">
+        <AlertTriangle size={16} aria-hidden="true" />
+        <AlertDescription>
+          This plugin is incompatible with OpenClaw versions greater than{" "}
+          {validationSummary.incompatibleAfterOpenClawVersion}.
+        </AlertDescription>
+      </Alert>
+    ) : null;
+  const validationPanel =
+    inspectorFindings && inspectorFindings.length > 0 ? (
+      <div className="plugin-tab-panel plugin-warnings-panel">
+        <Alert variant="info" role="status">
+          <Info size={16} aria-hidden="true" />
+          <AlertDescription>
+            Validation outputs are only visible to plugin owners and admins. Run locally using the
+            CLI: <code>clawhub package validate &lt;path-to-plugin&gt;</code>
+          </AlertDescription>
+        </Alert>
+        <div className="plugin-warning-list">
+          {inspectorFindings.map((finding) => (
+            <article
+              key={`${finding.version}:${finding.code}:${finding.message}`}
+              className={`plugin-warning-item is-${finding.findingKind ?? "warning"}`}
+            >
+              <div className="plugin-warning-item-header">
+                <Badge variant={finding.findingKind === "error" ? "destructive" : "warning"}>
+                  {finding.findingKind === "error" ? "Error" : "Warning"}
+                </Badge>
+                <code>{finding.code}</code>
+                {finding.issueClass ? <span>{finding.issueClass}</span> : null}
+                {finding.severity ? <span>{finding.severity}</span> : null}
+              </div>
+              <p>{finding.message}</p>
+              <dl className="plugin-warning-meta">
+                <div>
+                  <dt>Plugin version</dt>
+                  <dd>v{finding.version}</dd>
+                </div>
+                {finding.targetOpenClawVersion ? (
+                  <div>
+                    <dt>Target</dt>
+                    <dd>OpenClaw {finding.targetOpenClawVersion}</dd>
+                  </div>
+                ) : null}
+                {finding.inspectorVersion ? (
+                  <div>
+                    <dt>Inspector</dt>
+                    <dd>{finding.inspectorVersion}</dd>
+                  </div>
+                ) : null}
+                {finding.scanSource ? (
+                  <div>
+                    <dt>Scan</dt>
+                    <dd>{finding.scanSource}</dd>
+                  </div>
+                ) : null}
+              </dl>
+              {finding.evidence && finding.evidence.length > 0 ? (
+                <ul className="plugin-warning-evidence">
+                  {finding.evidence.slice(0, 4).map((entry) => (
+                    <li key={entry}>{entry}</li>
+                  ))}
+                </ul>
+              ) : null}
+            </article>
+          ))}
+        </div>
       </div>
     ) : null;
   const sourceRepoLink = verification?.sourceRepo
@@ -733,33 +737,36 @@ export function PluginDetailPage({
             </div>
           }
         >
-          <Card className="skill-install-command-card">
-            <CardHeader>
-              <CardTitle>Install</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="skill-install-command-wrap">
-                <div className="skill-install-command-shell">
-                  <pre className="skill-install-command">
-                    <code>{installSnippet}</code>
-                  </pre>
-                  <InstallCopyButton
-                    text={installSnippet}
-                    ariaLabel="Copy plugin install command"
-                    showLabel={false}
-                    className="skill-install-command-inline-button"
-                  />
+          <div className="plugin-install-stack">
+            {incompatibilityAlert}
+            <Card className="skill-install-command-card">
+              <CardHeader>
+                <CardTitle>Install</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="skill-install-command-wrap">
+                  <div className="skill-install-command-shell">
+                    <pre className="skill-install-command">
+                      <code>{installSnippet}</code>
+                    </pre>
+                    <InstallCopyButton
+                      text={installSnippet}
+                      ariaLabel="Copy plugin install command"
+                      showLabel={false}
+                      className="skill-install-command-inline-button"
+                    />
+                  </div>
                 </div>
-              </div>
-            </CardContent>
-          </Card>
+              </CardContent>
+            </Card>
+          </div>
           <PluginDetailTabs
             activeTab={activeTab}
             setActiveTab={setActiveTab}
             readmePanel={readmePanel}
-            capabilitiesPanel={capabilitiesPanel}
             compatibilityPanel={compatibilityPanel}
-            verificationPanel={verificationPanel}
+            validationPanel={validationPanel}
+            validationCount={validationCount}
           />
         </DetailHero>
       </DetailPageShell>
