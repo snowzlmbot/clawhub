@@ -46,6 +46,26 @@ export type MaliciousArtifactEmailArgs = {
   findingSummary?: string;
 };
 
+export type PackageInspectorEmailFinding = {
+  findingKind: "warning" | "error";
+  code: string;
+  issueClass?: string;
+  level?: string;
+  severity?: string;
+  message: string;
+  inspectorVersion?: string;
+  targetOpenClawVersion?: string;
+  scanSource?: "publish" | "nightly";
+};
+
+export type PackageInspectorFindingsEmailArgs = {
+  handle?: string;
+  packageName: string;
+  version: string;
+  warningUrl: string;
+  findings: PackageInspectorEmailFinding[];
+};
+
 type BanReasonSummary = {
   scannerLabel: string | null;
   findingSummary: string;
@@ -176,6 +196,10 @@ function buildScanDownloadCommand(args: MaliciousArtifactEmailArgs) {
   const version = args.version?.trim() || "<version>";
   const kindFlag = args.artifact.kind === "plugin" ? " --kind plugin" : "";
   return `clawhub scan download ${args.artifact.name} --version ${version}${kindFlag}`;
+}
+
+function buildPluginValidateCommand() {
+  return "clawhub package validate <path-to-plugin>";
 }
 
 function normalizeEmailFindingSummary(value: string | undefined) {
@@ -359,4 +383,99 @@ export function buildMaliciousArtifactEmail(args: MaliciousArtifactEmailArgs) {
     text: lines.join("\n"),
     html,
   };
+}
+
+export function buildPackageInspectorFindingsEmail(args: PackageInspectorFindingsEmailArgs) {
+  const targetOpenClawVersion = args.findings.find(
+    (finding) => finding.targetOpenClawVersion,
+  )?.targetOpenClawVersion;
+  const validateCommand = buildPluginValidateCommand();
+  const subject = `Plugin Inspector findings for ${args.packageName}@${args.version}`;
+  const findingCount = args.findings.length;
+  const intro = `We found ${findingCount} ${findingCount === 1 ? "issue" : "issues"} with version ${args.version} of ${args.packageName}.`;
+  const nextSteps = [
+    "Address the findings below in your plugin package.",
+    "Run the validation command locally against your changes.",
+    "When validation passes, upload a new version.",
+  ];
+  const findingLines = formatPackageInspectorFindingsText(args.findings);
+  const metadataLines = [
+    `Plugin: ${args.packageName}@${args.version}`,
+    targetOpenClawVersion ? `OpenClaw Version: ${targetOpenClawVersion}` : null,
+  ].filter((line): line is string => line !== null);
+  const lines = [
+    greeting(args.handle),
+    "",
+    intro,
+    "",
+    ...metadataLines,
+    "",
+    "Next steps:",
+    ...nextSteps.map((item) => `- ${item}`),
+    "",
+    "Findings:",
+    ...findingLines,
+    "",
+    "Validate a local fix:",
+    validateCommand,
+    "",
+    "ClawHub Security",
+  ];
+
+  const detailLines = [
+    detailLine("Plugin", `${args.packageName}@${args.version}`),
+    ...(targetOpenClawVersion ? [detailLine("OpenClaw Version", targetOpenClawVersion)] : []),
+  ].join("");
+  const html = emailShell({
+    title: "Plugin Inspector findings",
+    preheader: intro,
+    body: [
+      paragraph(greeting(args.handle)),
+      paragraph(intro),
+      detailLines,
+      sectionHeading("Next steps"),
+      bulletList(nextSteps),
+      sectionHeading("Findings"),
+      formatPackageInspectorFindingsHtml(args.findings),
+      sectionHeading("Validate a local fix"),
+      commandBlock(validateCommand),
+      paragraph("ClawHub Security"),
+    ].join(""),
+  });
+
+  return {
+    subject,
+    text: lines.join("\n"),
+    html,
+  };
+}
+
+function formatPackageInspectorFindingsText(findings: PackageInspectorEmailFinding[]) {
+  if (findings.length === 0) return ["- No findings were included."];
+  return findings.flatMap((finding) => [
+    `- **${finding.findingKind.toUpperCase()}** \`${finding.code}\`${formatFindingMetaText(finding)}`,
+    `  ${finding.message}`,
+  ]);
+}
+
+function formatFindingMetaText(finding: PackageInspectorEmailFinding) {
+  const meta = [finding.issueClass, finding.severity].filter(Boolean).join(", ");
+  return meta ? ` (${meta})` : "";
+}
+
+function formatPackageInspectorFindingsHtml(findings: PackageInspectorEmailFinding[]) {
+  if (findings.length === 0) return paragraph("No findings were included.");
+  return findings
+    .map((finding) => {
+      const meta = [finding.issueClass, finding.severity].filter(Boolean).join(" · ");
+      return `<div style="margin:0 0 10px;padding:10px 12px;border:1px solid #d8dee4;border-radius:6px;background:#ffffff;">
+        <p style="margin:0 0 6px;font-size:15px;line-height:22px;color:#1f2328;">
+          <strong>${escapeHtml(finding.findingKind.toUpperCase())}</strong>
+          <code style="font-family:ui-monospace,SFMono-Regular,Consolas,'Liberation Mono',monospace;font-size:13px;background:#f6f8fa;border:1px solid #d8dee4;border-radius:4px;padding:1px 4px;">${escapeHtml(finding.code)}</code>
+          ${meta ? `<span style="color:#57606a;">${escapeHtml(meta)}</span>` : ""}
+        </p>
+        <p style="margin:0;font-size:15px;line-height:22px;color:#1f2328;">${escapeHtml(finding.message)}</p>
+      </div>`;
+    })
+    .join("");
 }
