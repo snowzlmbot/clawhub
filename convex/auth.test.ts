@@ -5,6 +5,7 @@ import {
   DELETED_ACCOUNT_REAUTH_MESSAGE,
   createGitHubAuthProvider,
   handleDeletedUserSignIn,
+  normalizeGitHubProfileId,
 } from "./auth";
 
 function makeCtx({
@@ -148,5 +149,38 @@ describe("GitHub auth provider", () => {
     };
 
     expect(provider.options?.allowDangerousEmailAccountLinking).toBe(false);
+  });
+
+  it("normalizes numeric GitHub profile ids", () => {
+    expect(normalizeGitHubProfileId(123456)).toBe("123456");
+    expect(normalizeGitHubProfileId("789012")).toBe("789012");
+  });
+
+  it("rejects missing or nonnumeric GitHub profile ids", () => {
+    expect(() => normalizeGitHubProfileId(undefined)).toThrow(
+      "GitHub OAuth profile is missing a valid numeric id",
+    );
+    expect(() => normalizeGitHubProfileId("undefined")).toThrow(
+      "GitHub OAuth profile is missing a valid numeric id",
+    );
+    expect(() => normalizeGitHubProfileId("github-user")).toThrow(
+      "GitHub OAuth profile is missing a valid numeric id",
+    );
+  });
+
+  it("fails closed when the GitHub provider receives a malformed profile", () => {
+    const provider = createGitHubAuthProvider() as {
+      options?: { profile?: (profile: Record<string, unknown>) => Record<string, unknown> };
+    };
+
+    expect(() => provider.options?.profile?.({ message: "Bad credentials" })).toThrow(
+      "GitHub OAuth profile is missing a valid numeric id",
+    );
+    expect(provider.options?.profile?.({ id: 123456, login: "fixture-user" })).toEqual({
+      id: "123456",
+      name: "fixture-user",
+      email: undefined,
+      image: undefined,
+    });
   });
 });

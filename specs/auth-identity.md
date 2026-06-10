@@ -14,6 +14,12 @@ failure mode is a session whose GitHub login/avatar/handle belongs to one person
 while persisted profile fields such as display name, bio, ownership, or API
 tokens belong to another user.
 
+The GitHub provider must also fail closed when the OAuth profile does not expose
+a valid numeric `id`. Missing or malformed provider ids must never be coerced
+into strings such as `"undefined"` and used as `authAccounts.providerAccountId`.
+Malformed GitHub API responses during provider outages are authentication
+failures, not anonymous or linkable GitHub identities.
+
 `users.me`, protected mutations, ownership checks, and API token issuance must
 derive the actor server-side from Convex Auth (`getAuthUserId` via
 `requireUser`/`getOptionalActiveAuthUserId`). They must not accept client-supplied

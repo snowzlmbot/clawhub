@@ -16,6 +16,21 @@ export const DELETED_ACCOUNT_REAUTH_MESSAGE =
 const REAUTH_BLOCKING_BAN_ACTIONS = new Set(["user.ban", "user.autoban.malware"]);
 const DEV_PERSONAS = new Set(["owner", "user", "admin", "officialOrgMember", "abusePublisher"]);
 
+export function normalizeGitHubProfileId(profileId: unknown) {
+  const id =
+    typeof profileId === "number" && Number.isSafeInteger(profileId)
+      ? String(profileId)
+      : typeof profileId === "string"
+        ? profileId.trim()
+        : null;
+
+  if (!id || !/^\d+$/.test(id)) {
+    throw new Error("GitHub OAuth profile is missing a valid numeric id");
+  }
+
+  return id;
+}
+
 export function createGitHubAuthProvider() {
   return GitHub({
     clientId: process.env.AUTH_GITHUB_ID ?? "",
@@ -25,7 +40,7 @@ export function createGitHubAuthProvider() {
     allowDangerousEmailAccountLinking: false,
     profile(profile) {
       return {
-        id: String(profile.id),
+        id: normalizeGitHubProfileId(profile.id),
         name: profile.login,
         email: profile.email ?? undefined,
         image: profile.avatar_url,
