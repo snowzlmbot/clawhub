@@ -3,7 +3,7 @@
 import { mockEvent } from "h3";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const handler = (await import("./[...]")).default;
+const handler = (await import("../routes/ask-molty/[...]")).default;
 
 const originalProxyOrigin = process.env.ASK_MOLTY_PROXY_ORIGIN;
 const fetchMock = vi.fn(async (_target: URL, _init: RequestInit) => new Response("ok"));
