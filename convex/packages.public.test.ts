@@ -6757,8 +6757,7 @@ describe("packages public queries", () => {
             evidence: ["src/index.ts:4"],
             authorRemediation: {
               summary: "Move prompt mutation work to before_prompt_build.",
-              docsUrl:
-                "https://docs.openclaw.ai/clawhub/plugin-validation-fixes#legacy-before-agent-start",
+              docsUrl: "https://clawhub.ai/docs/plugin-validation-fixes#legacy-before-agent-start",
             },
           },
         ],
@@ -6852,8 +6851,7 @@ describe("packages public queries", () => {
           message: "legacy before_agent_start hook is deprecated",
           authorRemediation: {
             summary: "Move prompt mutation work to before_prompt_build.",
-            docsUrl:
-              "https://docs.openclaw.ai/clawhub/plugin-validation-fixes#legacy-before-agent-start",
+            docsUrl: "https://clawhub.ai/docs/plugin-validation-fixes#legacy-before-agent-start",
           },
         }),
       ],
@@ -6913,8 +6911,7 @@ describe("packages public queries", () => {
             fixture: "demo",
             authorRemediation: {
               summary: "Add a display name to the plugin manifest.",
-              docsUrl:
-                "https://docs.openclaw.ai/clawhub/plugin-validation-fixes#manifest-name-missing",
+              docsUrl: "https://clawhub.ai/docs/plugin-validation-fixes#manifest-name-missing",
             },
           },
         ],
@@ -6929,7 +6926,7 @@ describe("packages public queries", () => {
         inspectorFindingId: "demo:manifest-name-missing",
         authorRemediation: {
           summary: "Add a display name to the plugin manifest.",
-          docsUrl: "https://docs.openclaw.ai/clawhub/plugin-validation-fixes#manifest-name-missing",
+          docsUrl: "https://clawhub.ai/docs/plugin-validation-fixes#manifest-name-missing",
         },
       }),
     );
@@ -6985,8 +6982,7 @@ describe("packages public queries", () => {
             fixture: "demo",
             authorRemediation: {
               summary: "Move prompt mutation work to before_prompt_build.",
-              docsUrl:
-                "https://docs.openclaw.ai/clawhub/plugin-validation-fixes#legacy-before-agent-start",
+              docsUrl: "https://clawhub.ai/docs/plugin-validation-fixes#legacy-before-agent-start",
             },
           },
         ],
@@ -7044,8 +7040,7 @@ describe("packages public queries", () => {
             fixture: "demo",
             authorRemediation: {
               summary: "Replace registerTool with the current plugin API.",
-              docsUrl:
-                "https://docs.openclaw.ai/clawhub/plugin-validation-fixes#missing-expected-seam",
+              docsUrl: "https://clawhub.ai/docs/plugin-validation-fixes#missing-expected-seam",
             },
           },
         ],
@@ -7113,8 +7108,7 @@ describe("packages public queries", () => {
             fixture: "demo",
             authorRemediation: {
               summary: "Move prompt mutation work to before_prompt_build.",
-              docsUrl:
-                "https://docs.openclaw.ai/clawhub/plugin-validation-fixes#legacy-before-agent-start",
+              docsUrl: "https://clawhub.ai/docs/plugin-validation-fixes#legacy-before-agent-start",
             },
           },
         ],
@@ -7129,8 +7123,7 @@ describe("packages public queries", () => {
         issueClass: "deprecation-warning",
         authorRemediation: {
           summary: "Move prompt mutation work to before_prompt_build.",
-          docsUrl:
-            "https://docs.openclaw.ai/clawhub/plugin-validation-fixes#legacy-before-agent-start",
+          docsUrl: "https://clawhub.ai/docs/plugin-validation-fixes#legacy-before-agent-start",
         },
       }),
     );
@@ -7155,7 +7148,7 @@ describe("packages public queries", () => {
                 authorRemediation: {
                   summary: "Move prompt mutation work to before_prompt_build.",
                   docsUrl:
-                    "https://docs.openclaw.ai/clawhub/plugin-validation-fixes#legacy-before-agent-start",
+                    "https://clawhub.ai/docs/plugin-validation-fixes#legacy-before-agent-start",
                 },
               },
             ]),
@@ -7247,7 +7240,7 @@ describe("packages public queries", () => {
                       authorRemediation: {
                         summary: "Replace registerTool with the current plugin API.",
                         docsUrl:
-                          "https://docs.openclaw.ai/clawhub/plugin-validation-fixes#missing-expected-seam",
+                          "https://clawhub.ai/docs/plugin-validation-fixes#missing-expected-seam",
                       },
                       createdAt: 2,
                     },
@@ -7417,7 +7410,7 @@ describe("packages public queries", () => {
                       authorRemediation: {
                         summary: "Move prompt mutation work to before_prompt_build.",
                         docsUrl:
-                          "https://docs.openclaw.ai/clawhub/plugin-validation-fixes#legacy-before-agent-start",
+                          "https://clawhub.ai/docs/plugin-validation-fixes#legacy-before-agent-start",
                       },
                       createdAt: 1,
                     },
