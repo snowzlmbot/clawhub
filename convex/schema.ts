@@ -767,6 +767,27 @@ const skills = defineTable({
   statsStars: v.optional(v.number()),
   statsInstallsCurrent: v.optional(v.number()),
   statsInstallsAllTime: v.optional(v.number()),
+  installBackfill: v.optional(
+    v.object({
+      modelVersion: v.string(),
+      totalDownloads: v.number(),
+      pendingSkillDocDownloads: v.number(),
+      previousInstallsAllTime: v.number(),
+      targetInstallsAllTime: v.number(),
+      estimatedBackfilledInstalls: v.number(),
+      cleanWindowStartDay: v.number(),
+      cleanWindowEndDay: v.number(),
+      cleanDownloads: v.number(),
+      cleanInstalls: v.number(),
+      globalCleanRate: v.number(),
+      priorDownloads: v.number(),
+      minimumCleanDownloads: v.number(),
+      maxSmoothedRate: v.number(),
+      smoothedRate: v.number(),
+      pendingSkillDocInstallsAllTime: v.number(),
+      appliedAt: v.number(),
+    }),
+  ),
   stats: statsValidator,
   createdAt: v.number(),
   updatedAt: v.number(),
@@ -2091,7 +2112,8 @@ const skillStatEvents = defineTable({
   processedAt: v.optional(v.number()),
 })
   .index("by_unprocessed", ["processedAt"])
-  .index("by_skill", ["skillId"]);
+  .index("by_skill", ["skillId"])
+  .index("by_skill_processed", ["skillId", "processedAt"]);
 
 const skillStatUpdateCursors = defineTable({
   key: v.string(),
