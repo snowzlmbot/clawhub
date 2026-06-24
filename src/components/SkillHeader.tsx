@@ -120,7 +120,7 @@ type SkillHeaderProps = {
   clawdis: ClawdisSkillMetadata | undefined;
   category?: SkillCategory | null;
   categories?: SkillCategory[] | null;
-  priorityContent?: ReactNode;
+  staffVisibilityAlert?: ReactNode;
   postInstallContent?: ReactNode;
   securityAuditSummary?: ReactNode;
   activityTrend?: ActivityTrend | null;
@@ -158,7 +158,7 @@ export function SkillHeader({
   clawdis,
   category,
   categories,
-  priorityContent,
+  staffVisibilityAlert,
   postInstallContent,
   securityAuditSummary,
   activityTrend,
@@ -233,34 +233,39 @@ export function SkillHeader({
   };
 
   const managementToolbar =
-    hasOwnerActions || isStaff ? (
+    hasOwnerActions || isStaff || staffVisibilityAlert ? (
       <div className="skill-management-toolbar">
-        <div className="skill-management-toolbar-inner">
-          {newVersionHref ? (
-            <Button asChild variant="ghost" size="xs" className="skill-management-toolbar-action">
-              <a href={newVersionHref} aria-label="New version">
-                <Upload size={13} aria-hidden="true" />
-                New version
-              </a>
-            </Button>
-          ) : null}
-          {settingsHref ? (
-            <Button asChild variant="ghost" size="xs" className="skill-management-toolbar-action">
-              <a href={settingsHref} aria-label="Settings">
-                <Settings size={13} aria-hidden="true" />
-                Settings
-              </a>
-            </Button>
-          ) : null}
-          {isStaff ? (
-            <Button asChild variant="ghost" size="xs" className="skill-management-toolbar-action">
-              <Link to="/management" search={{ skill: skill.slug, plugin: undefined }}>
-                <ShieldCheck size={13} aria-hidden="true" />
-                Manage
-              </Link>
-            </Button>
-          ) : null}
-        </div>
+        {staffVisibilityAlert ? (
+          <div className="skill-management-toolbar-alert">{staffVisibilityAlert}</div>
+        ) : null}
+        {hasOwnerActions || isStaff ? (
+          <div className="skill-management-toolbar-inner">
+            {newVersionHref ? (
+              <Button asChild variant="ghost" size="xs" className="skill-management-toolbar-action">
+                <a href={newVersionHref} aria-label="New version">
+                  <Upload size={13} aria-hidden="true" />
+                  New version
+                </a>
+              </Button>
+            ) : null}
+            {settingsHref ? (
+              <Button asChild variant="ghost" size="xs" className="skill-management-toolbar-action">
+                <a href={settingsHref} aria-label="Settings">
+                  <Settings size={13} aria-hidden="true" />
+                  Settings
+                </a>
+              </Button>
+            ) : null}
+            {isStaff ? (
+              <Button asChild variant="ghost" size="xs" className="skill-management-toolbar-action">
+                <Link to="/management" search={{ skill: skill.slug, plugin: undefined }}>
+                  <ShieldCheck size={13} aria-hidden="true" />
+                  Manage
+                </Link>
+              </Button>
+            ) : null}
+          </div>
+        ) : null}
       </div>
     ) : null;
 
@@ -484,8 +489,6 @@ export function SkillHeader({
           </>
         }
       >
-        {priorityContent}
-
         <div className="detail-mobile-install">
           <SkillCommandLineCard
             slug={skill.slug}
