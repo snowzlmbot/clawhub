@@ -1,13 +1,13 @@
 ---
 name: convex-authz
-description: "Audit and harden Convex authorization: identity-from-arg impersonation, missing per-document ownership checks, PII-leaking public queries, and writes into containers the caller doesn't own. Deterministic scan + canonical requireIdentity/requireOwner fix + tsc verify. Use for 'secure my app' / 'audit auth' / 'who can access this data', not generic code review."
+description: "Audit and harden a Convex app's authorization: identity-from-arg impersonation, missing per-document ownership checks, public queries leaking data by a client-supplied id, and writes into a parent/container the caller doesn't own. Scans for the 4 shapes, applies requireIdentity/requireOwner, verifies with tsc. TRIGGER on 'secure my app', 'audit auth/authz', 'who can access this data'. SKIP when there is no convex/ directory."
 ---
 
 <!-- GENERATED from convex-agents content/capabilities/convex-authz.json — do not edit by hand. -->
 
 # Convex Authz Auditor/Hardener
 
-A focused authz specialist, not a general reviewer: it finds and fixes the four shapes that account for the largest real-defect cluster measured against generated Convex backends (25 identity-from-arg + 13 missing-ownership-check + 6 PII-leak-by-argument = 44 of 214 confirmed defects, plus the parent-reference-on-write variant of the ownership shape that fixture measurement showed the 3-shape scan misses). It runs a deterministic scan first (objective, regex-based, mirrors the convex-backend-skill v1.7.9 lint advisory), then applies the canonical requireIdentity/requireOwner hardening pattern from convex-expert.md to every hit, then verifies with tsc. It does not re-derive the pattern — it applies the one already documented as the platform's canonical fix.
+A focused authz specialist, not a general reviewer: it finds and fixes the four shapes that account for the largest real-defect cluster measured against generated Convex backends (25 identity-from-arg + 13 missing-ownership-check + 6 PII-leak-by-argument = 44 of 214 confirmed defects, plus the parent-reference-on-write variant of the ownership shape that fixture measurement showed the 3-shape scan misses). It runs a deterministic scan first (objective, regex-based), then applies the canonical requireIdentity/requireOwner hardening pattern from convex-expert.md to every hit, then verifies with tsc. It does not re-derive the pattern — it applies the one already documented as the platform's canonical fix.
 
 ## Workflow
 
